@@ -1,4 +1,6 @@
-# 阶段 0 感知：各方法评测结果
+# 各阶段评测结果
+
+§1–§9 是阶段 0（感知），§10 是阶段 1（记忆）。
 
 > 截至 2026-09-27，分支 `feature/p0-perception`。数字都来自下面列出的脚本和日志，重跑可以复现。
 > 设计决策见 `DESIGN.md` §6.1；这里只记录测量结果。
@@ -204,3 +206,31 @@ GSR test，COCO AP，置信度 ≥ 0.01，每帧取前 100 个框，TensorRT FP1
   - 原因：控球的那名球员检测得分只有 0.45–0.51，类别在门将和球员之间跳，按角色分开跟踪时一直没有轨迹，箭头只好落到离球第二近的人身上。
   - 两处修正：改成共用一个跟踪器；归属改为看离球最近的检测框，没有轨迹的人也能被指到。现在两边指向同一名球员。
 - 覆盖率两边相当；我们的错误身份更少。
+
+---
+
+## 10. 阶段 1 验收：比赛记忆（`DESIGN.md` §10）
+
+> 2026-09-27，分支 `phase1-memory`。`conda run -n matchlive pytest tests/test_memory.py`：8 个测试全部通过。
+> 实现：`matchlive/memory/`（`store.py` 写日志、由依据算状态；`view.py` 读取时现算推论）。
+
+| 验收项 | 测试 | 结果 |
+|---|---|---|
+| 新增条目、增加依据、驳回观测 | `test_status_follows_justifications` | ✅ 不充分 → 待定；回放补一条充分依据 → 已确认；驳回回放 → 回到待定；全部驳回 → 已撤销，比分随之变化 |
+| 未结案件对状态的影响 | `test_open_case_holds_members_pending` | ✅ 立案后成员变为待定、不再计入比分；结案后恢复 |
+| 裁决可以被后来的裁决推翻 | `test_later_verdict_overturns_earlier_verdict` | ✅ 驳回 `verdict:C1` 后，推断出的换人被撤销，阵容恢复 |
+| **修正的传播：黄牌** | `test_retracting_a_yellow_removes_the_derived_red` | ✅ 驳回第二张黄牌后，两黄推出的红牌和离场消失；另一名球员直接吃到的红牌不受影响 |
+| **修正的传播：身份** | `test_correcting_an_identity_moves_the_event_to_the_new_player` | ✅ 撤销轨迹的身份并写入新身份后，进球本身仍是已确认，进球者和球员统计换成新的人 |
+| 按知情时间查询 | `test_queries_see_only_what_was_known` | ✅ 写入之前查不到；事后回看能看到；被驳回之前一直计入；`t_known` 倒退会报错 |
+| 规则推论：换人 | `test_substitution_updates_lineups` | ✅ 换人更新场上和替补名单；换人被驳回后恢复首发阵容 |
+| `loop.cascade` 关掉（只正向更新的基线） | `test_cascade_off_keeps_inferences_forward_only` | ✅ 黄牌条目本身显示已撤销，但推出的红牌和离场保留，进球仍记在原来那名球员名下 |
+
+**附加检查**（临时脚本，不进仓库）：
+- 把"撤销黄牌"那个测试放到 `cascade=False` 下运行，测试失败，说明它确实能区分两种行为。
+- 日志写入 JSONL 后重新打开，各时刻的比分、红黄牌、阵容、统计和事件列表与原来完全一致。
+- 规模：600 个条目、916 条操作（相当于一个半场的量级），合成数据。
+
+| `loop.cascade` | 全部写入 | 读当前视图 | 读过去时刻（回放日志前缀） |
+|---|---|---|---|
+| 开 | 35 ms | 1.3 ms | 1.6 ms |
+| 关 | 433 ms（每条操作都要把已计入的事件并进去） | 0.4 ms | 113 ms |
