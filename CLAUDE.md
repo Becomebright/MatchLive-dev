@@ -2,14 +2,16 @@
 
 **Role of this file:** *how to work in this repo* — layout, environment, commands, coding and
 testing conventions, git rules. *What to build and why* (paper claim, architecture, data contracts,
-module responsibilities, phase plan) lives only in `DESIGN.md`; read it before any design or
+module responsibilities, phase plan) lives only in `docs/DESIGN.md`; read it before any design or
 implementation work, and don't restate its content here — link to its sections instead.
 
 ## Repo layout
 
 | Path | Purpose | In git |
 |---|---|---|
-| `DESIGN.md` | design source of truth (Chinese, user-reviewed) | yes |
+| `README.md` | project overview and pointers to the docs below | yes |
+| `docs/DESIGN.md` | design source of truth (Chinese, user-reviewed); referred to as `DESIGN.md` | yes |
+| `docs/SETUP.md` | new-machine setup: environment, model weights, data | yes |
 | `docs/results.md` | measured results of each method (what was run, with which script, and the numbers) | yes |
 | `matchlive/` | the Python package; subpackage split is `DESIGN.md` §8 | yes |
 | `configs/` | YAML configs: paths (relative to repo root), models, loop switches (`DESIGN.md` §7) | yes |
@@ -24,24 +26,14 @@ implementation work, and don't restate its content here — link to its sections
 
 ## Environment & commands
 
-conda env **`matchstream`** (Python 3.11), built on 2026-09-27 with:
-```bash
-conda create -n matchstream -c conda-forge --override-channels python=3.11 ffmpeg pip
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
-    transformers safetensors openai python-dotenv pyyaml tqdm pytest tensorrt-cu13
-pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
-pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
-```
-- **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
-  `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
-  `onnxruntime.preload_dlls()` before creating a CUDA session so ORT finds those libraries.
-- **TensorRT EP** (`tensorrt-cu13` 10.16, installed after the 2026-09-27 build) runs the detector
-  and the jersey classifier; engines are built on first use and cached under `cache/trt/` — the
-  first run is slow.
-- Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
-- Add further packages only when a phase actually needs them (e.g. `websocket-client` for TTS).
-- API keys come from `.env` (gitignored) via environment variables; never hardcode them.
+conda env **`matchstream`** (Python 3.11). Install commands, CUDA/TensorRT notes, and where the
+model weights and data come from: see `docs/SETUP.md`.
+- Add further packages only when a phase actually needs them (e.g. `websocket-client` for TTS),
+  and record them in `docs/SETUP.md`.
+- Model weights and match data sync through the private HF dataset repo
+  `Becomebright/MatchLive-assets` (`docs/SETUP.md` §3); upload any new file other machines need there.
+- API keys are read from environment variables (loaded from the gitignored `.env`); never
+  hardcode them.
 - Behaviour tests: `conda run -n matchstream pytest tests/`. Visual checks: `conda run -n matchstream
   python scripts/<name>.py`, writing into `outputs/`.
 - Diagrams: `mmdc` (mermaid-cli, via nvm Node) renders the Mermaid blocks in `DESIGN.md`; Chinese

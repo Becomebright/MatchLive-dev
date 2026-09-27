@@ -7,6 +7,8 @@ outputs/
 latex/
 
 .env
+# download metadata from `hf download --local-dir .` (docs/SETUP.md)
+.cache/
 .claude/
 __pycache__/
 *.pyc
