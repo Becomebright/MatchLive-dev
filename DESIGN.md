@@ -150,10 +150,10 @@ flowchart TB
 
 - **比赛时间**：内部统一用 `(half, second)`，其中 `second` 是这一半场视频的秒数（SoccerNet 的视频从开球开始计时）。
   - benchmark 里的 `timestamp` 是"整场视频时间轴"上的秒数（见 `dataset/streamingqa/part1/docs.md` §4）。`timestamp = offset[match][half] + second`，下半场的偏移量**每场比赛不同**（数值见 docs.md §4，例如 Chelsea–Liverpool 是 2773；已用全部题目核对过）。
-  - 所以 `(half, second)` 是唯一的主键；全局时间只在和 benchmark 对齐时，通过每场比赛的偏移表换算。半场视频的秒数是否等于比赛时钟，阶段 0 需要实测核对。
+  - 所以 `(half, second)` 是唯一的主键；全局时间只在和 benchmark 对齐时，通过每场比赛的偏移表换算。已实测核对（2026-09-27）：4 个半场都没有剪辑，视频秒数和比分牌时钟一比一走，偏差在 ±1.2 秒以内（下半场视频比开球早 0.3–1.1 秒），直接把视频秒数当作比赛时钟，不做校正。MU 上半场的视频截止在 45:00，不含补时。
 - **帧**：用 `(half, frame_idx)` 标识。帧率从视频读取；本地 4 个半场实测都是 25fps（每个半场含补时 45.0–50.3 分钟）。
 - **框**：统一用 `ltwh`（左、上、宽、高），和 v2 一致；只在模块边界处做格式转换。
-- **轨迹 ID**：用 `(shot_id, role, track_id)` 作为 key。镜头切换时跟踪器会 reset，轨迹 ID 会被重新发放，所以必须带上镜头编号（`trackers` 库的 ID 计数器是全局共享的，reset 会把它清零，见 v2 的 tracking.py）。
+- **轨迹 ID**：用 `(shot_id, role, track_id)` 作为 key。镜头切换时跟踪器会 reset，轨迹 ID 会被重新发放，所以必须带上镜头编号；每个角色各有一个跟踪器，每个实例各自从 0 发放 ID（`trackers` 2.6），同一个 `track_id` 会同时出现在不同角色和不同镜头里。
 - **球员 ID**：用 metadata 里的 `hash` 字段，它全场唯一，也能关联外部知识库。号码只是一个属性，不作为 ID。
 - **分数和状态**：我们自己的模型（检测、号码识别）输出的分数，只在感知端内部使用（比如投票、判断"号码是否清楚"）。进入记忆的只有定性状态，**大模型自己报的置信度一律不用**。
 
@@ -165,8 +165,8 @@ flowchart TB
 ```python
 Detection(role, bbox_ltwh, score, class_id)                  # 沿用 v2
 Track(shot_id, role, bbox_ltwh, score, track_id,
-      team, player_id, identity_source)                      # identity_source: vote | entry（记忆里已确认的身份条目）
-FramePerception(half, frame_idx, tracks, shot)               # 一帧的全部感知结果
+      team, player_id, identity_source)                      # role ∈ {player, goalkeeper}；identity_source: vote | entry（记忆里已确认的身份条目）
+FramePerception(half, frame_idx, tracks, ball, shot)         # 一帧的全部感知结果；ball: Detection | None（场上只有一个球，不跟踪）
 Shot(shot_id, start, end, kind, is_replay)                   # kind ∈ {wide, medium, closeup, other}
 ```
 逐帧的身份投票保存在 `IdentityResolver` 里，属于感知模块自己的状态，不进入操作日志（更新太频繁）。只有**被事件引用到的轨迹**，才把它的身份写成记忆里的身份条目（§5.2）；记忆里已确认的身份条目，感知端必须遵守。
@@ -235,8 +235,8 @@ mem.at(event_time, known_by=None)    # known_by 默认等于 event_time
 ### 6.1 感知（从 v2 移植，并做以下修改）
 | 子模块 | 来源 | 修改点 |
 |---|---|---|
-| `detection` | v2 | ONNX 改为 CUDA 优先，没有 GPU 时退回 CPU |
-| `tracking` | v2 | 基本不变；镜头切换时显式调用 reset |
+| `detection` | v2 | 模型用 RF-DETR-L；ONNX 优先用 TensorRT EP（FP16，引擎缓存在 `cache/trt/`），不可用时依次退回 CUDA、CPU |
+| `tracking` | v2 | 换用 BoT-SORT（带镜头运动补偿，两个角色共用一次光流估计；SoccerNet-GSR 上 HOTA 65.3，ByteTrack 63.6）；镜头切换时显式调用 reset。**只跟踪球员和门将**：球每帧取得分最高、超过阈值的检测框，不跟踪（GSR 上跟踪不优于逐帧取最高分，BoT-SORT 会把球的召回率降到 0.30） |
 | `jersey` | v2 | `predict_batch` 返回**完整的 101 维概率**，用于判断"号码是否清楚"以及做候选约束；修复 v2 在 transformers 5.x 下检查点加载失败的问题（细节见 CLAUDE.md 的移植注意事项） |
 | `identity` | v2 | (a) 在场名单作为**可推翻约束**：只在场上球员里投票；读到名单以外的号码时**不丢弃**，而是作为证据交给一致性检查；(b) 同一帧内一个球员最多对应一条轨迹（匈牙利算法，硬约束）；(c) 遵守记忆里已确认的身份条目；(d) 修复 v2 把门将球衣颜色当成第 3、4 支队伍的问题（见 CLAUDE.md 的移植注意事项） |
 | `shots`（新） | — | 镜头切换检测（相邻帧颜色直方图差）；镜头类型用感知统计判断（草地占比、框的数量和大小）；**回放检测用台标转场（logo wipe）**，这是转播里最可靠的信号；召回不够时再考虑加 API 兜底 |
@@ -416,7 +416,7 @@ matchlive/
 ---
 
 ## 9. 运行资源约束
-- 本机 GPU 是 RTX 4060 Ti 8GB：够跑检测（RF-DETR-2XL）和号码识别的推理，但跑不了本地 VLM。这也是"先用 API"的现实前提。
+- 本机 GPU 是 RTX 4060 Ti 8GB：够跑检测（RF-DETR-L，TensorRT FP16）和号码识别的推理，但跑不了本地 VLM。这也是"先用 API"的现实前提。
 - 需要微调或本地部署 VLM 时，要另找服务器，届时再修订本节。
 
 ---
