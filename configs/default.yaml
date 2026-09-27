@@ -27,6 +27,14 @@ perception:
     # wide views score 0.33-0.5.
     cut_threshold: 0.3
 
+  jersey:
+    checkpoint: jersey_dinov3_convnext_tiny-20_matches.safetensors   # torch weights, export source
+    model: jersey_dinov3_convnext_tiny-20_matches.onnx         # exported by scripts/export_jersey_onnx.py
+    providers: [tensorrt, cuda, cpu]
+    fp16: true
+    trt_cache: trt/jersey_fp16
+    max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
+
   ball:
     # The ball is not tracked: each frame takes its best ball detection above this score
     # (SoccerNet-GSR: precision 0.84, recall 0.76 at 0.3).

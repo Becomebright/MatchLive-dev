@@ -237,7 +237,7 @@ mem.at(event_time, known_by=None)    # known_by 默认等于 event_time
 |---|---|---|
 | `detection` | v2 | 模型用 RF-DETR-L；ONNX 优先用 TensorRT EP（FP16，引擎缓存在 `cache/trt/`），不可用时依次退回 CUDA、CPU |
 | `tracking` | v2 | 换用 BoT-SORT（带镜头运动补偿，两个角色共用一次光流估计；SoccerNet-GSR 上 HOTA 65.3，ByteTrack 63.6）；镜头切换时显式调用 reset。**只跟踪球员和门将**：球每帧取得分最高、超过阈值的检测框，不跟踪（GSR 上跟踪不优于逐帧取最高分，BoT-SORT 会把球的召回率降到 0.30） |
-| `jersey` | v2 | `predict_batch` 返回**完整的 101 维概率**，用于判断"号码是否清楚"以及做候选约束；修复 v2 在 transformers 5.x 下检查点加载失败的问题（细节见 CLAUDE.md 的移植注意事项） |
+| `jersey` | v2 | 检查点用 `jersey_dinov3_convnext_tiny-20_matches`，导出 ONNX，TensorRT FP16 推理（和检测相同）；`predict_batch` 返回**完整的 101 维概率**，用于判断"号码是否清楚"以及做候选约束；修复 v2 在 transformers 5.x 下检查点加载失败的问题（细节见 CLAUDE.md 的移植注意事项） |
 | `identity` | v2 | (a) 在场名单作为**可推翻约束**：只在场上球员里投票；读到名单以外的号码时**不丢弃**，而是作为证据交给一致性检查；(b) 同一帧内一个球员最多对应一条轨迹（匈牙利算法，硬约束）；(c) 遵守记忆里已确认的身份条目；(d) 修复 v2 把门将球衣颜色当成第 3、4 支队伍的问题（见 CLAUDE.md 的移植注意事项） |
 | `shots`（新） | — | 镜头切换检测（相邻帧颜色直方图差）；镜头类型用感知统计判断（草地占比、框的数量和大小）；**回放检测用台标转场（logo wipe）**，这是转播里最可靠的信号；召回不够时再考虑加 API 兜底 |
 | `calibration`（可选，阶段 6 以后） | NBJW（MIT 许可） | 只在远景镜头上跑，而且要判断结果是否可信；每隔几帧跑一次，中间插值 |

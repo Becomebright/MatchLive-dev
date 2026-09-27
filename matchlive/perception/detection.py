@@ -43,8 +43,12 @@ def to_detections(boxes_ltwh: np.ndarray, scores: np.ndarray, class_ids: np.ndar
     return records
 
 
-def _session_providers(config: dict[str, Any], cache_dir: Path) -> list:
-    """Build ORT's provider list from the config's preference order, skipping unavailable ones."""
+def session_providers(config: dict[str, Any], cache_dir: Path, trt_options: dict | None = None) -> list:
+    """Build ORT's provider list from the config's preference order, skipping unavailable ones.
+
+    `config` needs `providers`, `fp16` and `trt_cache` (engine dir under `cache_dir`);
+    `trt_options` adds TensorRT EP options, e.g. the shape profile of a dynamic batch.
+    """
     # CUDA/cuDNN come from the pip nvidia-* wheels; ORT only finds them after this call.
     ort.preload_dlls()
     available = set(ort.get_available_providers())
@@ -72,6 +76,7 @@ def _session_providers(config: dict[str, Any], cache_dir: Path) -> list:
                     "trt_engine_cache_path": str(engine_dir),
                     "trt_timing_cache_enable": True,
                     "trt_timing_cache_path": str(engine_dir.parent),
+                    **(trt_options or {}),
                 },
             ))
         elif name == "cuda" and "CUDAExecutionProvider" in available:
@@ -90,7 +95,7 @@ class RFDETRDetector:
         self.session = ort.InferenceSession(
             str(checkpoints_dir / config["model"]),
             sess_options=options,
-            providers=_session_providers(config, cache_dir),
+            providers=session_providers(config, cache_dir),
         )
         # ORT silently falls back when a provider fails to initialise, so record what
         # is actually running.

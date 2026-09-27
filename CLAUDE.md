@@ -30,12 +30,14 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
     transformers safetensors openai python-dotenv pyyaml tqdm pytest tensorrt-cu13
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
+pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
   `onnxruntime.preload_dlls()` before creating a CUDA session so ORT finds those libraries.
-- **TensorRT EP** (`tensorrt-cu13` 10.16, installed after the 2026-09-27 build) runs the detector;
-  engines are built on first use and cached under `cache/trt/` — the first run is slow.
+- **TensorRT EP** (`tensorrt-cu13` 10.16, installed after the 2026-09-27 build) runs the detector
+  and the jersey classifier; engines are built on first use and cached under `cache/trt/` — the
+  first run is slow.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - Add further packages only when a phase actually needs them (e.g. `websocket-client` for TTS).
 - API keys come from `.env` (gitignored) via environment variables; never hardcode them.
