@@ -1,5 +1,5 @@
 # Only here so `pip install -e .` makes `matchlive` importable from scripts/ and tests/;
-# dependencies are installed as described in CLAUDE.md, not from this file.
+# dependencies are installed as described in docs/SETUP.md, not from this file.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
