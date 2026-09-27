@@ -19,9 +19,10 @@ class Detection:
 
 @dataclass(frozen=True)
 class Track:
-    # A track is identified by (shot_id, role, track_id), never by track_id alone
-    # (DESIGN.md §4): trackers are reset at every shot cut and each role has its own
-    # tracker, so the same track_id is re-issued across shots and across roles.
+    # A track is identified by (shot_id, track_id), never by track_id alone (DESIGN.md §4):
+    # tracking restarts at every shot cut, so the same track_id is re-issued in each shot.
+    # The role is an attribute, not part of the key: it is the track's majority detected
+    # class so far and may change.
     shot_id: int
     role: str                                   # "goalkeeper" | "player" (the ball is not tracked)
     track_id: int
@@ -33,5 +34,5 @@ class Track:
     identity_source: str | None = None          # "vote" | "entry" (confirmed in memory)
 
     @property
-    def key(self) -> tuple[int, str, int]:
-        return (self.shot_id, self.role, self.track_id)
+    def key(self) -> tuple[int, int]:
+        return (self.shot_id, self.track_id)

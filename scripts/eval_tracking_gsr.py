@@ -1,6 +1,6 @@
 """Tracking and ball metrics on the SoccerNet-GSR test set.
 
-Runs our perception front end — RF-DETR detections, shot-cut resets, per-role trackers,
+Runs our perception front end — RF-DETR detections, shot-cut resets, the player tracker,
 per-frame ball selection — over every GSR test sequence and scores it against the GSR
 ground truth:
   people: player + goalkeeper tracks vs GT players and goalkeepers with the `trackers`
@@ -37,7 +37,7 @@ from trackers.eval import evaluate_mot_sequences
 from matchlive.common.config import REPO_ROOT, load_config
 from matchlive.perception.detection import RFDETRDetector, to_detections
 from matchlive.perception.shots import ShotDetector
-from matchlive.perception.tracking import MultiRoleTracker, select_ball
+from matchlive.perception.tracking import PlayerTracker, select_ball
 
 GSR_DIR = REPO_ROOT / "dataset/SoccerNetGS/test"
 LABEL_PATHS = sorted(GSR_DIR.glob("SNGS-*/Labels-GameState.json"))
@@ -117,8 +117,8 @@ def main():
         gt_ball = write_ground_truth(labels, gt_dir)
         ball_gt += len(gt_ball)
         shots = ShotDetector(config["perception"]["shots"]["cut_threshold"])
-        tracker = MultiRoleTracker(tracking, frame_rate=labels["info"]["frame_rate"])
-        # Tracks are keyed (shot_id, role, track_id); the MOT file needs one integer id each.
+        tracker = PlayerTracker(tracking, frame_rate=labels["info"]["frame_rate"])
+        # Tracks are keyed (shot_id, track_id); the MOT file needs one integer id each.
         mot_id: dict[tuple, int] = {}
         lines = []
         for image in sorted(labels["images"], key=lambda im: im["file_name"]):

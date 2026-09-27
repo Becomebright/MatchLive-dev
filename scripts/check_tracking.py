@@ -1,6 +1,6 @@
 """Visual check of shot cuts and tracking on a match video segment.
 
-Runs detection -> shot-cut detection -> per-role tracking + ball selection over `--seconds`
+Runs detection -> shot-cut detection -> player tracking + ball selection over `--seconds`
 of one half and writes into outputs/check_tracking/:
   <name>.mp4       track overlay, with the shot id in the corner (red on a cut frame)
   <name>_cuts.jpg  every detected cut as a (frame before | cut frame) pair, to count
@@ -21,7 +21,7 @@ from matchlive.common.config import load_config
 from matchlive.common.match import Match
 from matchlive.perception.detection import RFDETRDetector
 from matchlive.perception.shots import ShotDetector
-from matchlive.perception.tracking import MultiRoleTracker, select_ball
+from matchlive.perception.tracking import PlayerTracker, select_ball
 from matchlive.perception.visualization import draw_tracks
 
 
@@ -46,7 +46,7 @@ def main():
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     detector = RFDETRDetector(perception["detection"], paths["checkpoints"], paths["cache"])
     shots = ShotDetector(perception["shots"]["cut_threshold"])
-    tracker = MultiRoleTracker(perception["tracking"], frame_rate=fps)
+    tracker = PlayerTracker(perception["tracking"], frame_rate=fps)
     print("providers:", detector.providers, "| tracker:", perception["tracking"]["algorithm"])
 
     out_dir = paths["outputs"] / "check_tracking"
@@ -84,7 +84,7 @@ def main():
             cut_pairs.append(pair)
         prev_frame = frame
 
-        vis = draw_tracks(frame, tracks, ball)
+        vis = draw_tracks(frame, tracks, ball, detections=detections)
         cv2.putText(vis, f"shot {shot_id}  d={shots.last_distance:.2f}", (20, 690), 0, 0.8,
                     (0, 0, 255) if is_cut else (255, 255, 255), 2)
         writer.write(vis)

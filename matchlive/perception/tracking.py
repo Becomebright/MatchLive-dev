@@ -1,16 +1,26 @@
-"""Multi-role tracking (ported from v2), BoT-SORT or ByteTrack from the `trackers` library,
+"""Player tracking (ported from v2), BoT-SORT or ByteTrack from the `trackers` library,
 plus per-frame ball selection.
 
-One tracker instance per role (goalkeeper / player) so track ids never cross roles.
-Synchronous: feed one frame's detections, get back that frame's tracks.
+One tracker for outfield players and goalkeepers together; each track's role is the
+majority class of the detections it has matched. Synchronous: feed one frame's
+detections, get back that frame's tracks.
 
-Changed from v2: all trackers are reset at every shot cut and tracks carry the shot id;
-the algorithm is chosen in the config (BoT-SORT adds camera-motion compensation); the
-ball is no longer tracked (see select_ball).
+Changed from v2:
+  * all tracking restarts at every shot cut and tracks carry the shot id;
+  * the algorithm is chosen in the config (BoT-SORT adds camera-motion compensation);
+  * the ball is no longer tracked (see select_ball);
+  * no per-role trackers. v2 kept one tracker per role so a ball box could not take a
+    player's id, and so a weak second-class reading of a player box (a phantom keeper)
+    could not drag the keeper's track onto it. The ball is gone from tracking, and the
+    detector keeps one class per query, so neither reason stands — while splitting by
+    role broke a player in two whenever his detected class flickered: on SoccerNet-GSR,
+    18% of keeper detections come out as "player" and 9% of ground-truth tracks switch
+    class at least once, each switch handing the box to the other role's tracker.
 """
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
@@ -18,6 +28,7 @@ import supervision as sv
 from trackers import BoTSORTTracker, ByteTrackTracker
 
 from matchlive.common.types import Detection, Track
+from matchlive.perception.detection import CLASS_ID_TO_ROLE
 
 
 def _to_supervision(detections: list[Detection]):
@@ -34,70 +45,45 @@ def _to_supervision(detections: list[Detection]):
     return sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
 
 
-class MultiRoleTracker:
+class PlayerTracker:
     def __init__(self, config: dict[str, Any], frame_rate: float):
         # `config` is the perception.tracking section of the YAML config.
         tracker_class = {"botsort": BoTSORTTracker, "bytetrack": ByteTrackTracker}[config["algorithm"]]
-        params = config[config["algorithm"]]
-        # One independent tracker per role. Association is by position/IoU only, so
-        # feeding both roles to a single instance would let a keeper box inherit a nearby
-        # outfield player's id (and vice versa). Isolating each role means a tracker only
-        # ever sees one kind of box, so ids cannot cross roles.
-        #
-        # In trackers 2.6 each instance allocates its own ids from 0 (v2's 2.3.0
-        # shared one global counter), so the same track_id is live in several roles at
-        # once: a track is only identified by (shot_id, role, track_id).
-        self.trackers = {
-            role: tracker_class(frame_rate=float(frame_rate), **params)
-            for role in ("goalkeeper", "player")
-        }
-        # BoT-SORT's camera-motion compensation (CMC) estimates the global frame-to-frame
-        # motion — the same for every role — but each instance would compute it again on
-        # the same frame. Hand both trackers one shared estimator that computes once per
-        # frame (at 720p the per-instance version cost ~6 ms/frame per tracker).
-        self.shared_cmc = None
-        if getattr(self.trackers["player"], "cmc", None) is not None:
-            self.shared_cmc = _SharedCMC(self.trackers["player"].cmc)
-            for tracker in self.trackers.values():
-                tracker.cmc = self.shared_cmc
+        self.tracker = tracker_class(frame_rate=float(frame_rate), **config[config["algorithm"]])
+        # `frame` is only used by BoT-SORT's camera-motion compensation; ByteTrack warns
+        # if it is given one.
+        self.uses_frame = config["algorithm"] == "botsort"
+        # Per track id (within the current shot): the roles of the detections it matched.
+        self.role_votes: dict[int, Counter] = defaultdict(Counter)
         self.shot_id: int | None = None
 
     def update(self, detections: list[Detection], frame: np.ndarray, shot_id: int) -> list[Track]:
         # A new shot id means the camera cut: positions in the new shot have nothing to do
-        # with the old one, so both trackers start over instead of matching across the cut.
+        # with the old one, so tracking starts over instead of matching across the cut.
         if shot_id != self.shot_id:
-            for tracker in self.trackers.values():
-                tracker.reset()
+            self.tracker.reset()
+            self.role_votes.clear()
             self.shot_id = shot_id
-        if self.shared_cmc is not None:
-            self.shared_cmc.new_frame()
 
+        people = _to_supervision([d for d in detections if d.role in ("player", "goalkeeper")])
+        tracked = self.tracker.update(people, frame) if self.uses_frame else self.tracker.update(people)
         tracks: list[Track] = []
-        for role, tracker in self.trackers.items():
-            # Route each detection to its role's tracker; this filter is what
-            # keeps the per-role isolation described in __init__.
-            role_dets = [d for d in detections if d.role == role]
-            # `frame` (BGR) is only used by BoT-SORT's camera-motion compensation;
-            # ByteTrack warns if it is given one.
-            if self.shared_cmc is not None:
-                tracked = tracker.update(_to_supervision(role_dets), frame)
-            else:
-                tracked = tracker.update(_to_supervision(role_dets))
-            for bbox, score, track_id in zip(tracked.xyxy, tracked.confidence, tracked.tracker_id):
-                # -1 marks a detection not yet promoted to a confirmed track
-                # (still within minimum_consecutive_frames).
-                if int(track_id) == -1:
-                    continue
-                x1, y1, x2, y2 = (float(v) for v in bbox.tolist())
-                tracks.append(
-                    Track(
-                        shot_id=shot_id,
-                        role=role,
-                        track_id=int(track_id),
-                        bbox_ltwh=(x1, y1, x2 - x1, y2 - y1),
-                        score=float(score),
-                    )
-                )
+        for bbox, score, class_id, track_id in zip(tracked.xyxy, tracked.confidence,
+                                                   tracked.class_id, tracked.tracker_id):
+            # -1 marks a detection not yet promoted to a confirmed track
+            # (still within minimum_consecutive_frames).
+            if int(track_id) == -1:
+                continue
+            votes = self.role_votes[int(track_id)]
+            votes[CLASS_ID_TO_ROLE[int(class_id)]] += 1
+            x1, y1, x2, y2 = (float(v) for v in bbox.tolist())
+            tracks.append(Track(
+                shot_id=shot_id,
+                role=votes.most_common(1)[0][0],
+                track_id=int(track_id),
+                bbox_ltwh=(x1, y1, x2 - x1, y2 - y1),
+                score=float(score),
+            ))
         return tracks
 
 
@@ -113,31 +99,3 @@ def select_ball(detections: list[Detection], min_score: float) -> Detection | No
     """
     balls = [d for d in detections if d.role == "ball" and d.score > min_score]
     return max(balls, key=lambda d: d.score, default=None)
-
-
-class _SharedCMC:
-    """One camera-motion estimate per frame, shared by the per-role BoT-SORT trackers.
-
-    Stands in for each tracker's own `trackers.utils.cmc.CMC` (BoT-SORT only calls
-    `estimate()` and `reset()` on it). The first role to ask on a frame computes the
-    estimate; the others reuse it. With the default sparse-optical-flow method the
-    estimate depends only on the frames, not on the detection boxes each role passes in;
-    the feature-based methods (orb / sift) mask out those boxes and would need all roles'
-    boxes here instead.
-    """
-
-    def __init__(self, cmc):
-        self.cmc = cmc
-        self.affine: np.ndarray | None = None
-
-    def new_frame(self) -> None:
-        self.affine = None
-
-    def estimate(self, frame_bgr: np.ndarray, dets_xyxy: np.ndarray | None = None) -> np.ndarray:
-        if self.affine is None:
-            self.affine = self.cmc.estimate(frame_bgr, dets_xyxy)
-        return self.affine
-
-    def reset(self) -> None:
-        self.cmc.reset()
-        self.affine = None

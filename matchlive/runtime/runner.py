@@ -21,7 +21,7 @@ from matchlive.perception.detection import RFDETRDetector
 from matchlive.perception.identity import kit_color
 from matchlive.perception.jersey import NUM_LABELS, JerseyReader, crop_upper_body
 from matchlive.perception.shots import ShotDetector
-from matchlive.perception.tracking import MultiRoleTracker
+from matchlive.perception.tracking import PlayerTracker
 
 
 class MatchRunner:
@@ -73,7 +73,7 @@ class MatchRunner:
         """
         perception = self.config["perception"]
         shots = ShotDetector(perception["shots"]["cut_threshold"])
-        tracker = MultiRoleTracker(perception["tracking"], frame_rate=fps)
+        tracker = PlayerTracker(perception["tracking"], frame_rate=fps)
 
         shot_ids, det_rows, track_rows, jersey_rows, color_rows = [], [], [], [], []
         timing = {"decode": 0.0, "detect": 0.0, "shots": 0.0, "track": 0.0, "jersey": 0.0, "color": 0.0}

@@ -20,9 +20,12 @@ ROLE_COLOR = {"goalkeeper": (0, 255, 255), "player": (0, 200, 0)}
 
 def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | None = None,
                 team_bgr: Mapping[str, tuple[int, int, int]] | None = None,
-                labels: Mapping[str, tuple[str, str]] | None = None) -> np.ndarray:
+                labels: Mapping[str, tuple[str, str]] | None = None,
+                detections: Sequence[Detection] = ()) -> np.ndarray:
     """`team_bgr` maps a track's team ("home"/"away") to its colour; `labels` maps a
-    player_id to (jersey number, name) drawn on the ellipse and under it."""
+    player_id to (jersey number, name) drawn on the ellipse and under it. The ball carrier
+    is the player / keeper detection nearest the ball among `detections`, tracked or not
+    (a player whose track has not started yet still holds the ball)."""
     out = frame.copy()
     team_bgr, labels = team_bgr or {}, labels or {}
 
@@ -35,7 +38,6 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
         width = max(14, int(round(w * 1.6)))
         _inverted_triangle(out, x + w // 2, max(8, y - 4), width, (0, 0, 255))
 
-    carrier = _nearest_to_ball(tracks, ball_point)
     for t in tracks:
         x, y, w, h = (int(round(v)) for v in t.bbox_ltwh)
         color = team_bgr.get(t.team, ROLE_COLOR[t.role])
@@ -65,15 +67,15 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
         if name:
             _centered_text(out, name, (center[0], center[1] + axes[1] + 14), 0.5)
 
-        # Mark the player nearest the ball with a green triangle (the carrier).
-        if t is carrier:  # object identity: track_id alone is not unique across roles
-            width = max(16, int(round(w * 0.45)))
-            _inverted_triangle(out, center[0], max(8, y - 4), width, (0, 255, 0))
-
+    # Mark the ball carrier with a green triangle above the box.
+    carrier = _nearest_to_ball([d for d in detections if d.role != "ball"], ball_point)
+    if carrier is not None:
+        x, y, w, h = (int(round(v)) for v in carrier.bbox_ltwh)
+        _inverted_triangle(out, x + w // 2, max(8, y - 4), max(16, int(round(w * 0.45))), (0, 255, 0))
     return out
 
 
-def _nearest_to_ball(players: Sequence[Track], ball_point: tuple[int, int] | None) -> Track | None:
+def _nearest_to_ball(players: Sequence[Detection], ball_point: tuple[int, int] | None) -> Detection | None:
     # Player whose feet (box bottom-center) are closest to the ball point.
     # Squared distance is enough for an argmin; no need for the sqrt.
     if ball_point is None or not players:

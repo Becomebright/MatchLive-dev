@@ -108,9 +108,10 @@ def main():
             stats["v2"][1] += sum(t.jersey_number is not None for t in v2_tracks)
             stats["ours"][0] += len(tracks)
             stats["ours"][1] += sum(t.player_id is not None for t in tracks)
-            ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), config["perception"]["ball"]["min_score"])
+            dets = to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0)
+            ball = select_ball(dets, config["perception"]["ball"]["min_score"])
             left = v2_draw(frame, v2_tracks, v2_resolver.team_bgr, v2_resolver.rosters)
-            right = draw_tracks(frame, tracks, ball, team_bgr, labels)
+            right = draw_tracks(frame, tracks, ball, team_bgr, labels, dets)
             pair = np.hstack([cv2.resize(left, (640, 360)), cv2.resize(right, (640, 360))])
             second = frame_idx / fps
             cv2.putText(pair, f"v2   {int(second // 60)}:{second % 60:05.2f}", (8, 24), 0, 0.7, (0, 255, 255), 2)

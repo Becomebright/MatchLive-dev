@@ -32,7 +32,7 @@ import numpy as np
 
 from matchlive.common.types import Track
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 ROLE_CODE = {"goalkeeper": 0, "player": 1}
 ROLE_NAME = {code: role for role, code in ROLE_CODE.items()}
 

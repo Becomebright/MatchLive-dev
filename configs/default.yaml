@@ -52,8 +52,8 @@ perception:
     min_score: 0.3
 
   tracking:
-    # Players and goalkeepers only. BoT-SORT beats ByteTrack on SoccerNet-GSR (HOTA 65.3
-    # vs 63.6, IDSW -44%), all of it from camera-motion compensation
+    # One tracker for players and goalkeepers. BoT-SORT beats ByteTrack on SoccerNet-GSR
+    # (HOTA 65.5 vs 63.6, IDSW -52%), all of it from camera-motion compensation
     # (scripts/eval_tracking_gsr.py).
     algorithm: botsort                 # botsort | bytetrack
     # Keyword arguments passed straight to the trackers library class of that name.

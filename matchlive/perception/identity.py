@@ -7,7 +7,7 @@ Two parts:
     update() once per frame in order; identities at frame t use only frames <= t.
 
 Team comes from kit colour matched in LAB space, number from the jersey classifier; both
-are accumulated as per-track votes (tracks are keyed (shot_id, role, track_id)).
+are accumulated as per-track votes (tracks are keyed (shot_id, track_id)).
 
 Kit colour differs from v2, measured on SoccerNet-GSR ground-truth crops: v2 k-means'd
 the saturated pixels into dominant colours, which throws away white and black kits
@@ -115,7 +115,7 @@ class IdentityResolver:
         # now, so the default is 1).
         if frame_idx % cfg["vote_every"] == 0:
             for track, probs, color in zip(tracks, jersey_probs, colors):
-                self._vote_team(track.key, color)
+                self._vote_team(track, color)
                 if not np.isnan(probs[0]):
                     label = int(np.argmax(probs))
                     if label != UNREADABLE and probs[label] >= cfg["jersey_min_prob"]:
@@ -172,10 +172,11 @@ class IdentityResolver:
                 for number, votes in self.number_votes[key].items()
                 if votes >= self.config["min_number_votes"] and (team, number) not in roster]
 
-    def _vote_team(self, key: tuple, color: np.ndarray) -> None:
+    def _vote_team(self, track: Track, color: np.ndarray) -> None:
         if np.isnan(color[0]):
             return
-        if key[1] == "goalkeeper":
+        key = track.key
+        if track.role == "goalkeeper":
             # (d) keepers are matched against keeper kits only (too few keepers on screen
             # to cluster); without keeper kit colours in the metadata, no colour vote.
             kit = self._nearest(color, self.keeper_kits)

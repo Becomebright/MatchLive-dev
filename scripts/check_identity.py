@@ -69,8 +69,9 @@ def main():
                 stats["player"] += 1
                 identified[t.team].add(labels[t.player_id][0])
             teams[t.key] = t.team
-        ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), config["perception"]["ball"]["min_score"])
-        writer.write(draw_tracks(frame, tracks, ball, team_bgr, labels))
+        dets = to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0)
+        ball = select_ball(dets, config["perception"]["ball"]["min_score"])
+        writer.write(draw_tracks(frame, tracks, ball, team_bgr, labels, dets))
     writer.release()
 
     total = max(stats.pop("boxes", 0), 1)

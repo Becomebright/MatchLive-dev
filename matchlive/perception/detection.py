@@ -130,8 +130,7 @@ class RFDETRDetector:
         # box at 0.72 also surfaced as a goalkeeper box at 0.23, on the same query,
         # in 2 of 20 sampled frames. That phantom is too weak to start a track of its
         # own, but the tracker's low-confidence second association stage can still
-        # match it to the real keeper's track and drag that track onto an outfield
-        # player — the id stealing the per-role trackers exist to prevent.
+        # match it to the keeper's track and drag that track onto an outfield player.
         scores_per_class = 1.0 / (1.0 + np.exp(-logits))
         class_ids = scores_per_class.argmax(axis=1)
         scores = scores_per_class[np.arange(len(class_ids)), class_ids]
