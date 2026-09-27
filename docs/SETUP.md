@@ -13,13 +13,13 @@ git checkout dev
 
 ## 2. Environment
 
-conda env **`matchstream`** (Python 3.11):
+conda env **`matchlive`** (Python 3.11):
 ```bash
-conda create -n matchstream -c conda-forge --override-channels python=3.11 ffmpeg pip
-conda activate matchstream
+conda create -n matchlive -c conda-forge --override-channels python=3.11 ffmpeg pip
+conda activate matchlive
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
-    transformers safetensors openai python-dotenv pyyaml tqdm pytest tensorrt-cu13
+    transformers safetensors openai python-dotenv pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 ```
@@ -27,7 +27,9 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
   `onnxruntime.preload_dlls()` before creating a CUDA session so ORT finds those libraries.
   The NVIDIA driver must support CUDA 13 (`nvidia-smi` shows the highest supported version).
-- **TensorRT EP** (`tensorrt-cu13` 10.16) runs the detector and the jersey classifier.
+- **TensorRT EP** (`tensorrt-cu13` 10.16) runs the detector and the jersey classifier. Keep the
+  pin: ORT 1.30 loads `libnvinfer.so.10`, so with TensorRT 11 the TensorRT EP fails to load and
+  ORT silently falls back to CUDA.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - Create `.env` in the repo root for API keys; no phase needs one yet.
 
@@ -38,10 +40,11 @@ the repo root, so a single download drops every file in place:
 ```bash
 hf auth login                 # a token with read access to the repo
 hf download Becomebright/MatchLive-assets --repo-type dataset --local-dir . \
-    --include "dataset/*" "checkpoints/*"
+    --include "dataset/*" --include "checkpoints/*"
 ```
-`--include` skips the HF repo's own `.gitattributes`/`README.md`; the download also writes
-metadata to `.cache/huggingface/` (gitignored).
+One pattern per `--include` (a second bare pattern is read as a filename). `--include` skips the
+HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
+`.cache/huggingface/` (gitignored).
 
 | Path | Size | Used by |
 |---|---|---|
@@ -84,7 +87,7 @@ TensorRT engines are built on first use and cached under `cache/trt/`: the first
 (minutes). Engines are specific to the GPU model and TensorRT version, so never copy `cache/trt/`
 between machines. Check the setup end to end on a two-minute segment:
 ```bash
-conda run -n matchstream python scripts/run_perception.py \
+conda run -n matchlive python scripts/run_perception.py \
     --match "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool" --half 1 --start 600 --seconds 120
 ```
 It prints the cache path, detection/track counts and per-stage ms/frame; compare the timing with

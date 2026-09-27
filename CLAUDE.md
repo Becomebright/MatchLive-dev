@@ -26,7 +26,7 @@ implementation work, and don't restate its content here — link to its sections
 
 ## Environment & commands
 
-conda env **`matchstream`** (Python 3.11). Install commands, CUDA/TensorRT notes, and where the
+conda env **`matchlive`** (Python 3.11). Install commands, CUDA/TensorRT notes, and where the
 model weights and data come from: see `docs/SETUP.md`.
 - Add further packages only when a phase actually needs them (e.g. `websocket-client` for TTS),
   and record them in `docs/SETUP.md`.
@@ -34,7 +34,7 @@ model weights and data come from: see `docs/SETUP.md`.
   `Becomebright/MatchLive-assets` (`docs/SETUP.md` §3); upload any new file other machines need there.
 - API keys are read from environment variables (loaded from the gitignored `.env`); never
   hardcode them.
-- Behaviour tests: `conda run -n matchstream pytest tests/`. Visual checks: `conda run -n matchstream
+- Behaviour tests: `conda run -n matchlive pytest tests/`. Visual checks: `conda run -n matchlive
   python scripts/<name>.py`, writing into `outputs/`.
 - Diagrams: `mmdc` (mermaid-cli, via nvm Node) renders the Mermaid blocks in `DESIGN.md`; Chinese
   text needs `FONTCONFIG_FILE=~/.config/fontconfig/fonts.conf` (set in `~/.zshrc`).
