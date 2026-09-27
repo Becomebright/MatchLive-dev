@@ -1,7 +1,7 @@
 """Shot-cut detection from colour-histogram change between consecutive frames.
 
 Every hard cut starts a new shot: the trackers are reset there and track keys carry the
-shot id (DESIGN.md §4). Shot type and replay detection come later (phase 2).
+shot id (DESIGN.md §4). Shot type and replay detection are shelved (DESIGN.md §6.1).
 """
 
 from __future__ import annotations
