@@ -14,6 +14,12 @@ benchmark_offsets:
   "2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United": {1: 0, 2: 2700}
   "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool": {1: 0, 2: 2773}
 
+# Loop switches (DESIGN.md §7); each is added in the phase that implements it.
+loop:
+  # On: inferences and event participants follow the current evidence on every read.
+  # Off: the forward-only baseline — once counted, an event and its players stay counted.
+  cascade: true
+
 perception:
   detection:
     model: rfdetr-l.onnx               # under paths.checkpoints

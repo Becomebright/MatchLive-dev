@@ -21,6 +21,8 @@ class Detection:
 class Track:
     # A track is identified by (shot_id, track_id), never by track_id alone (DESIGN.md §4):
     # tracking restarts at every shot cut, so the same track_id is re-issued in each shot.
+    # Shot ids restart every half, so outside perception (which runs one half at a time)
+    # the key is (half, shot_id, track_id).
     # The role is an attribute, not part of the key: it is the track's majority detected
     # class so far and may change.
     shot_id: int
