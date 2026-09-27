@@ -10,10 +10,11 @@ implementation work, and don't restate its content here — link to its sections
 | Path | Purpose | In git |
 |---|---|---|
 | `DESIGN.md` | design source of truth (Chinese, user-reviewed) | yes |
+| `docs/results.md` | measured results of each method (what was run, with which script, and the numbers) | yes |
 | `matchlive/` | the Python package; subpackage split is `DESIGN.md` §8 | yes |
 | `configs/` | YAML configs: paths (relative to repo root), models, loop switches (`DESIGN.md` §7) | yes |
 | `scripts/` | entry points and visual checks that write videos/images for inspection | yes |
-| `tests/` | pytest unit tests for pure logic (state, rules, time conversion) | yes |
+| `tests/` | pytest checks that a module does its job (e.g. memory cascade, rule firing) — see Testing | yes |
 | `dataset/` | match videos + `metadata.json` (`organized_data/`), streaming QA (`streamingqa/`) | no |
 | `checkpoints/` | model weights (RF-DETR ONNX, DINOv3 backbone, jersey head) | no |
 | `cache/`, `outputs/` | perception/API caches, run outputs — safe to delete, costly to rebuild | no |
@@ -27,22 +28,34 @@ conda env **`matchstream`** (Python 3.11), built on 2026-09-27 with:
 ```bash
 conda create -n matchstream -c conda-forge --override-channels python=3.11 ffmpeg pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.3.0" supervision opencv-python numpy scipy \
-    transformers safetensors openai python-dotenv pyyaml tqdm pytest
+pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
+    transformers safetensors openai python-dotenv pyyaml tqdm pytest tensorrt-cu13
+pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
+pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
   `onnxruntime.preload_dlls()` before creating a CUDA session so ORT finds those libraries.
+- **TensorRT EP** (`tensorrt-cu13` 10.16, installed after the 2026-09-27 build) runs the detector
+  and the jersey classifier; engines are built on first use and cached under `cache/trt/` — the
+  first run is slow.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - Add further packages only when a phase actually needs them (e.g. `websocket-client` for TTS).
 - API keys come from `.env` (gitignored) via environment variables; never hardcode them.
-- Unit tests: `conda run -n matchstream pytest tests/`. Visual checks: `conda run -n matchstream
+- Behaviour tests: `conda run -n matchstream pytest tests/`. Visual checks: `conda run -n matchstream
   python scripts/<name>.py`, writing into `outputs/`.
 - Diagrams: `mmdc` (mermaid-cli, via nvm Node) renders the Mermaid blocks in `DESIGN.md`; Chinese
   text needs `FONTCONFIG_FILE=~/.config/fontconfig/fonts.conf` (set in `~/.zshrc`).
 
 ## Conventions
 
+- **Testing — check what a module achieves, not its plumbing.**
+  - *Write* checks of a module's effect: the phase acceptance checks in `DESIGN.md` §10 and
+    anything like them, e.g. perception overlay videos and per-frame timing, identity accuracy,
+    memory cascade (retracting a yellow card removes the derived red card), rule firing counts.
+    Visual/report checks go in `scripts/`, pass/fail checks in `tests/`.
+  - *Don't write* tests for interfaces or I/O: function signatures and return types, config or
+    file loading, cache read/write, serialization round-trips, API client wiring.
 - Data conventions (time units, boxes, track and player keys) are a design contract — see
   `DESIGN.md` §4; follow them rather than restating or redefining them locally.
 - No hardcoded absolute paths: everything resolves from `configs/` relative to the repo root.

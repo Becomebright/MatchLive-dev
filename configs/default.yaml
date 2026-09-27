@@ -1,0 +1,72 @@
+# Default configuration. All paths are relative to the repo root (resolved by
+# matchlive.common.config.load_config).
+
+paths:
+  dataset: dataset/organized_data
+  checkpoints: checkpoints
+  cache: cache
+  outputs: outputs
+  v2: ../live-comment-v2               # the reference implementation (scripts/compare_v2.py)
+
+# Whole-video timestamp of each half's second 0, used only to align with the streaming-QA
+# benchmark (DESIGN.md §4): timestamp = benchmark_offsets[match][half] + second.
+benchmark_offsets:
+  "2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United": {1: 0, 2: 2700}
+  "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool": {1: 0, 2: 2773}
+
+perception:
+  detection:
+    model: rfdetr-l.onnx               # under paths.checkpoints
+    providers: [tensorrt, cuda, cpu]   # tried in this order; unavailable ones are skipped
+    fp16: true                         # TensorRT only
+    trt_cache: trt/rfdetr-l_fp16       # TensorRT engine cache, under paths.cache
+    confidence: 0.15
+
+  shots:
+    # Colour-histogram distance between consecutive frames. 0.3: no false cut on 41k
+    # main-camera frames (match videos) or 36.7k GSR frames; hard cuts between similar
+    # wide views score 0.33-0.5.
+    cut_threshold: 0.3
+
+  jersey:
+    checkpoint: jersey_dinov3_convnext_tiny-20_matches.safetensors   # torch weights, export source
+    model: jersey_dinov3_convnext_tiny-20_matches.onnx         # exported by scripts/export_jersey_onnx.py
+    providers: [tensorrt, cuda, cpu]
+    fp16: true
+    trt_cache: trt/jersey_fp16
+    max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
+
+  identity:
+    # Per-track votes over the cached observations (perception.identity.IdentityResolver).
+    vote_every: 1                      # frames between a track's votes (v2: 15)
+    jersey_min_prob: 0.9               # a number read counts as a vote at this probability
+    min_number_votes: 2                # votes a number needs before it can name the player
+    team_min_margin: 0.2               # (far - near) / (far + near) kit distance to vote a team
+    kit_burn_in: 200                   # outfield colours seen before splitting them into two kits
+    kit_adapt_rate: 0.02               # how far each confident claim moves its cluster centre
+    one_player_per_track: true         # Hungarian assignment within each frame
+
+  ball:
+    # The ball is not tracked: each frame takes its best ball detection above this score
+    # (SoccerNet-GSR: precision 0.84, recall 0.76 at 0.3).
+    min_score: 0.3
+
+  tracking:
+    # One tracker for players and goalkeepers. BoT-SORT beats ByteTrack on SoccerNet-GSR
+    # (HOTA 65.5 vs 63.6, IDSW -52%), all of it from camera-motion compensation
+    # (scripts/eval_tracking_gsr.py).
+    algorithm: botsort                 # botsort | bytetrack
+    # Keyword arguments passed straight to the trackers library class of that name.
+    bytetrack:                         # v2 values
+      lost_track_buffer: 30
+      track_activation_threshold: 0.5
+      minimum_consecutive_frames: 2
+      minimum_iou_threshold: 0.1
+      high_conf_det_threshold: 0.5
+    botsort:                           # library defaults, except cmc_downscale
+      lost_track_buffer: 30
+      track_activation_threshold: 0.7
+      minimum_consecutive_frames: 2
+      high_conf_det_threshold: 0.6
+      enable_cmc: true
+      cmc_downscale: 4                 # 720p -> 320x180 optical flow: same accuracy as 2x, ~40% cheaper
