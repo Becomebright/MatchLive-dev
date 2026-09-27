@@ -27,6 +27,10 @@ class Track:
     track_id: int
     bbox_ltwh: tuple[float, float, float, float]
     score: float
+    # Identity (DESIGN.md §5.1), filled in by perception.identity.IdentityResolver.
+    team: str | None = None                     # "home" | "away" | None (no team vote yet)
+    player_id: str | None = None                # roster hash, None until identified
+    identity_source: str | None = None          # "vote" | "entry" (confirmed in memory)
 
     @property
     def key(self) -> tuple[int, str, int]:

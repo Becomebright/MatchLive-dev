@@ -12,6 +12,8 @@ instead of re-running the models. Arrays (row order = frame order):
                                      track_id, l, t, w, h
   jersey   float16 (M, 101)          jersey-number probabilities of each track row, read
                                      on every frame; NaN where the box was too small to crop
+  color    float32 (M, 3)            mean LAB kit colour of each track row's crop
+                                     (identity.kit_color); NaN where there was no crop
 
 `frame` is the frame index within the half. The file name carries a hash of everything
 the arrays depend on (video, model files, perception parameters, format version), so a
@@ -22,13 +24,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-FORMAT_VERSION = 1
+from matchlive.common.types import Track
+
+FORMAT_VERSION = 3
 ROLE_CODE = {"goalkeeper": 0, "player": 1}
+ROLE_NAME = {code: role for role, code in ROLE_CODE.items()}
 
 
 def _file_id(path: Path) -> list:
@@ -38,21 +44,27 @@ def _file_id(path: Path) -> list:
     return [path.name, stat.st_size, stat.st_mtime_ns]
 
 
-def cache_path(config: dict[str, Any], video: Path, match_name: str, half: int,
-               start_frame: int, n_frames: int | None) -> Path:
+def perception_key(config: dict[str, Any], sources: list[Path]) -> str:
+    """Hash of everything the cached arrays depend on: the input files (`sources`, e.g.
+    the video), both model files, the perception parameters and the format version."""
     perception = config["perception"]
     ckpt = config["paths"]["checkpoints"]
     depends_on = {
         "format": FORMAT_VERSION,
-        "video": _file_id(video),
+        "sources": [_file_id(p) for p in sources],
         "detector": _file_id(ckpt / perception["detection"]["model"]),
         "jersey": _file_id(ckpt / perception["jersey"]["model"]),
         "confidence": perception["detection"]["confidence"],
         "shots": perception["shots"],
         "tracking": perception["tracking"],
     }
-    key = hashlib.sha1(json.dumps(depends_on, sort_keys=True).encode()).hexdigest()[:10]
+    return hashlib.sha1(json.dumps(depends_on, sort_keys=True).encode()).hexdigest()[:10]
+
+
+def cache_path(config: dict[str, Any], video: Path, match_name: str, half: int,
+               start_frame: int, n_frames: int | None) -> Path:
     span = "all" if n_frames is None else f"{start_frame}+{n_frames}"
+    key = perception_key(config, [video])
     return config["paths"]["cache"] / "perception" / match_name / f"half{half}_{span}_{key}.npz"
 
 
@@ -70,3 +82,21 @@ def load_perception(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         arrays = {k: data[k] for k in data.files if k != "meta"}
         meta = json.loads(str(data["meta"]))
     return arrays, meta
+
+
+def iter_frames(arrays: dict[str, np.ndarray]) -> Iterator[tuple[int, list[Track], np.ndarray, np.ndarray, np.ndarray]]:
+    """Decode cached arrays frame by frame, in frame order: (frame_idx, tracks, jersey,
+    color, det) — the frame's Tracks (score 1.0: not cached), their jersey-probability and
+    colour rows, and its detection rows (l, t, w, h, score, class_id). Frames with neither
+    tracks nor detections are skipped."""
+    track, jersey, color, det = arrays["track"], arrays["jersey"].astype(np.float32), arrays["color"], arrays["det"]
+    # Rows are written in frame order, so each frame's rows form one contiguous run.
+    frames = sorted(set(track[:, 0].astype(int)) | set(det[:, 0].astype(int)))
+    t_start = np.searchsorted(track[:, 0], frames, side="left")
+    t_end = np.searchsorted(track[:, 0], frames, side="right")
+    d_start = np.searchsorted(det[:, 0], frames, side="left")
+    d_end = np.searchsorted(det[:, 0], frames, side="right")
+    for f, ts, te, ds, de in zip(frames, t_start, t_end, d_start, d_end):
+        tracks = [Track(int(r[1]), ROLE_NAME[int(r[2])], int(r[3]), tuple(float(v) for v in r[4:8]), 1.0)
+                  for r in track[ts:te]]
+        yield f, tracks, jersey[ts:te], color[ts:te], det[ds:de, 1:]

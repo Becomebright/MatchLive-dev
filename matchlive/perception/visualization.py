@@ -1,13 +1,13 @@
 """Draw tracks onto a frame: feet ellipses, ball triangle, ball-carrier marker (ported from v2).
 
-Same visual design as v2. Identity (team colour, jersey number, name) is not drawn yet —
-it comes with the identity module; until then ellipses use a role colour and show the
-track id.
+Same visual design as v2: with an identity, the ellipse takes the team colour and shows
+the jersey number (with the player's name below); otherwise it falls back to a role
+colour and the track id.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -18,8 +18,13 @@ from matchlive.common.types import Detection, Track
 ROLE_COLOR = {"goalkeeper": (0, 255, 255), "player": (0, 200, 0)}
 
 
-def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | None = None) -> np.ndarray:
+def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | None = None,
+                team_bgr: Mapping[str, tuple[int, int, int]] | None = None,
+                labels: Mapping[str, tuple[str, str]] | None = None) -> np.ndarray:
+    """`team_bgr` maps a track's team ("home"/"away") to its colour; `labels` maps a
+    player_id to (jersey number, name) drawn on the ellipse and under it."""
     out = frame.copy()
+    team_bgr, labels = team_bgr or {}, labels or {}
 
     # Ball: red marker above it. ball_point (the box's bottom-center) is the reference
     # for finding the ball carrier below.
@@ -33,7 +38,7 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
     carrier = _nearest_to_ball(tracks, ball_point)
     for t in tracks:
         x, y, w, h = (int(round(v)) for v in t.bbox_ltwh)
-        color = ROLE_COLOR[t.role]
+        color = team_bgr.get(t.team, ROLE_COLOR[t.role])
         center = (x + w // 2, y + h)  # ellipse sits at the player's feet
         axes = (max(7, int(w * 0.5)), max(2, int(w * 0.12)))
 
@@ -53,7 +58,11 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
         cv2.ellipse(out, center, axes, 0, 0, 360, (0, 0, 0), 3)
         cv2.ellipse(out, center, axes, 0, 0, 360, color, 2)
 
-        _centered_text(out, str(t.track_id), center, 0.7)
+        # Jersey number when identified, else the raw track id.
+        number, name = labels.get(t.player_id, (None, None))
+        _centered_text(out, number or str(t.track_id), center, 0.7)
+        if name:
+            _centered_text(out, name, (center[0], center[1] + axes[1] + 14), 0.5)
 
         # Mark the player nearest the ball with a green triangle (the carrier).
         if t is carrier:  # object identity: track_id alone is not unique across roles

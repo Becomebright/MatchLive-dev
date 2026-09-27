@@ -10,6 +10,7 @@ implementation work, and don't restate its content here — link to its sections
 | Path | Purpose | In git |
 |---|---|---|
 | `DESIGN.md` | design source of truth (Chinese, user-reviewed) | yes |
+| `docs/results.md` | measured results of each method (what was run, with which script, and the numbers) | yes |
 | `matchlive/` | the Python package; subpackage split is `DESIGN.md` §8 | yes |
 | `configs/` | YAML configs: paths (relative to repo root), models, loop switches (`DESIGN.md` §7) | yes |
 | `scripts/` | entry points and visual checks that write videos/images for inspection | yes |

@@ -35,6 +35,16 @@ perception:
     trt_cache: trt/jersey_fp16
     max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
 
+  identity:
+    # Per-track votes over the cached observations (perception.identity.IdentityResolver).
+    vote_every: 1                      # frames between a track's votes (v2: 15)
+    jersey_min_prob: 0.9               # a number read counts as a vote at this probability
+    min_number_votes: 2                # votes a number needs before it can name the player
+    team_min_margin: 0.2               # (far - near) / (far + near) kit distance to vote a team
+    kit_burn_in: 200                   # outfield colours seen before splitting them into two kits
+    kit_adapt_rate: 0.02               # how far each confident claim moves its cluster centre
+    one_player_per_track: true         # Hungarian assignment within each frame
+
   ball:
     # The ball is not tracked: each frame takes its best ball detection above this score
     # (SoccerNet-GSR: precision 0.84, recall 0.76 at 0.3).
