@@ -58,9 +58,10 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
         cv2.ellipse(out, center, axes, 0, 0, 360, (0, 0, 0), 3)
         cv2.ellipse(out, center, axes, 0, 0, 360, color, 2)
 
-        # Jersey number when identified, else the raw track id.
+        # Jersey number when identified, else the track id — prefixed "t" so the two
+        # never look alike.
         number, name = labels.get(t.player_id, (None, None))
-        _centered_text(out, number or str(t.track_id), center, 0.7)
+        _centered_text(out, number or f"t{t.track_id}", center, 0.7)
         if name:
             _centered_text(out, name, (center[0], center[1] + axes[1] + 14), 0.5)
 

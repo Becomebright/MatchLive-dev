@@ -6,6 +6,7 @@ paths:
   checkpoints: checkpoints
   cache: cache
   outputs: outputs
+  v2: ../live-comment-v2               # the reference implementation (scripts/compare_v2.py)
 
 # Whole-video timestamp of each half's second 0, used only to align with the streaming-QA
 # benchmark (DESIGN.md §4): timestamp = benchmark_offsets[match][half] + second.

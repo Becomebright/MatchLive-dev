@@ -58,14 +58,15 @@ class MatchRunner:
 
         arrays, timing = self.perceive(frames(), fps)
         meta = {"match": match.name, "half": half, "fps": fps, "start_frame": start_frame,
-                "n_frames": len(arrays["shot_id"]), "ms_per_frame": timing}
+                "n_frames": len(arrays["shot_id"]), **timing}
         save_perception(path, arrays, meta)
         return path
 
     def perceive(self, frames: Iterable[tuple[int, np.ndarray]], fps: float,
                  detections: dict[int, list[Detection]] | None = None) -> tuple[dict, dict]:
         """Run the per-frame chain over (frame_idx, BGR frame) pairs and return the raw cache
-        arrays (layout in matchlive.common.cache) and mean ms/frame per stage.
+        arrays (layout in matchlive.common.cache) and a timing summary: mean ms/frame per
+        stage ("ms_per_frame") and percentiles of each frame's total ("total_ms").
 
         `detections` (frame_idx -> detections) replaces the detector, for data whose
         detections are already cached (SoccerNet-GSR evaluation).
@@ -76,6 +77,7 @@ class MatchRunner:
 
         shot_ids, det_rows, track_rows, jersey_rows, color_rows = [], [], [], [], []
         timing = {"decode": 0.0, "detect": 0.0, "shots": 0.0, "track": 0.0, "jersey": 0.0, "color": 0.0}
+        totals = []
         t_prev = time.perf_counter()
         for frame_idx, frame in frames:
             t0 = time.perf_counter()
@@ -106,6 +108,7 @@ class MatchRunner:
             # "decode" is the time spent getting this frame from the iterator.
             for key, dt in zip(timing, (t0 - t_prev, t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)):
                 timing[key] += dt
+            totals.append(t5 - t_prev)
             t_prev = time.perf_counter()
 
         n = max(len(shot_ids), 1)
@@ -116,4 +119,9 @@ class MatchRunner:
             "jersey": np.concatenate(jersey_rows or [np.zeros((0, NUM_LABELS))]).astype(np.float16),
             "color": np.concatenate(color_rows or [np.zeros((0, 3))]).astype(np.float32),
         }
-        return arrays, {k: 1000 * v / n for k, v in timing.items()}
+        # Real time at 25 fps means every frame, not just the average, fits in 40 ms.
+        ms = 1000 * np.asarray(totals or [0.0])
+        total_ms = {"p50": float(np.percentile(ms, 50)), "p90": float(np.percentile(ms, 90)),
+                    "p99": float(np.percentile(ms, 99)), "max": float(ms.max()),
+                    "share_over_40": float((ms > 40).mean())}
+        return arrays, {"ms_per_frame": {k: 1000 * v / n for k, v in timing.items()}, "total_ms": total_ms}

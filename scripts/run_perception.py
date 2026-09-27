@@ -35,6 +35,8 @@ def main():
           f"{len(arrays['det'])} detections, {len(arrays['track'])} track boxes")
     print("ms/frame: " + "  ".join(f"{k} {v:.1f}" for k, v in meta["ms_per_frame"].items())
           + f"  | total {sum(meta['ms_per_frame'].values()):.1f}")
+    print("frame total ms: " + "  ".join(f"{k} {v:.3f}" if k == "share_over_40" else f"{k} {v:.1f}"
+                                        for k, v in meta["total_ms"].items()))
 
 
 if __name__ == "__main__":

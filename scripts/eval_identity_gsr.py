@@ -115,7 +115,7 @@ def main():
                 detections[int(image["file_name"][:-4])] = to_detections(
                     r[:, :4] * SCALE, r[:, 4], r[:, 5], confidence)
             arrays, timing = runner.perceive(frames_720p(label_path, images), 25.0, detections)
-            save_perception(path, arrays, {"sequence": name, "ms_per_frame": timing,
+            save_perception(path, arrays, {"sequence": name, **timing,
                                            "kits": kit_colours(label_path, images, gt)})
         arrays, meta = load_perception(path)
         kits = {kit: np.asarray(v, dtype=np.float32) for kit, v in meta["kits"].items()}
