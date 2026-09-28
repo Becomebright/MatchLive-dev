@@ -19,7 +19,7 @@ conda create -n matchlive -c conda-forge --override-channels python=3.11 ffmpeg 
 conda activate matchlive
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
-    transformers safetensors openai python-dotenv pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
+    transformers safetensors google-genai pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 ```
@@ -31,7 +31,9 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
   pin: ORT 1.30 loads `libnvinfer.so.10`, so with TensorRT 11 the TensorRT EP fails to load and
   ORT silently falls back to CUDA.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
-- Create `.env` in the repo root for API keys; no phase needs one yet.
+- The LLM API (Gemini, through the `google-genai` SDK) needs `export GOOGLE_API_KEY=...` in
+  your shell profile; the key is never stored in the repo. Cached API responses (`cache/api/`)
+  replay without it.
 
 ## 3. Model weights and match data (private)
 
@@ -48,7 +50,8 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 
 | Path | Size | Used by |
 |---|---|---|
-| `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` | 3.3G | every pipeline run (`paths.dataset`) |
+| `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (3 matches) | 5.3G | every pipeline run (`paths.dataset`) |
+| `dataset/organized_data/.../2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-caption_with_gt.json` | 58K | ground-truth events (SoccerNet-Caption format, `gt_gameTime` = corrected time) |
 | `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark |
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | jersey reader (`perception.jersey.model`) |

@@ -68,14 +68,24 @@ def draw_tracks(frame: np.ndarray, tracks: Sequence[Track], ball: Detection | No
             _centered_text(out, name, (center[0], center[1] + axes[1] + 14), 0.5)
 
     # Mark the ball carrier with a green triangle above the box.
-    carrier = _nearest_to_ball([d for d in detections if d.role != "ball"], ball_point)
+    carrier = nearest_to_ball([d for d in detections if d.role != "ball"], ball_point)
     if carrier is not None:
         x, y, w, h = (int(round(v)) for v in carrier.bbox_ltwh)
         _inverted_triangle(out, x + w // 2, max(8, y - 4), max(16, int(round(w * 0.45))), (0, 255, 0))
     return out
 
 
-def _nearest_to_ball(players: Sequence[Detection], ball_point: tuple[int, int] | None) -> Detection | None:
+def draw_ids(frame: np.ndarray, boxes: Sequence[tuple[str, tuple[float, float, float, float]]]) -> np.ndarray:
+    """The event analyzer's light mode (DESIGN.md §6.3 `ids_text`): only an ID label ("P3")
+    above each (label, ltwh box), so the picture stays uncluttered and the identities
+    travel as text instead of being drawn."""
+    out = frame.copy()
+    for label, (x, y, w, h) in boxes:
+        _centered_text(out, label, (int(round(x + w / 2)), max(10, int(round(y)) - 10)), 0.6)
+    return out
+
+
+def nearest_to_ball(players: Sequence[Detection], ball_point: tuple[int, int] | None) -> Detection | None:
     # Player whose feet (box bottom-center) are closest to the ball point.
     # Squared distance is enough for an argmin; no need for the sqrt.
     if ball_point is None or not players:

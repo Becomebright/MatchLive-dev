@@ -20,6 +20,20 @@ loop:
   # Off: the forward-only baseline — once counted, an event and its players stay counted.
   cascade: true
 
+# LLM API (DESIGN.md §2 principle 9), called through the google.genai SDK; responses cached
+# under paths.cache/<cache>, keyed by model + request.
+api:
+  api_key_env: GOOGLE_API_KEY          # read from the environment, never stored in a file
+  model: gemini-3.8-flash
+  cache: api
+
+events:
+  # Fixed windows over the whole half (DESIGN.md §6.2).
+  window_seconds: 30
+  window_overlap: 5
+  sample_fps: 2                        # frames per second shown to the event analyzer (§6.3)
+  replay_lookback: 90                  # W: a replayed event happened within W s before its window (§6.5)
+
 perception:
   detection:
     model: rfdetr-l.onnx               # under paths.checkpoints
