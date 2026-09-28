@@ -16,6 +16,9 @@ benchmark_offsets:
 
 # Loop switches (DESIGN.md §7); each is added in the phase that implements it.
 loop:
+  # On: proposals are matched to existing entries and checked against the constraints
+  # (DESIGN.md §6.4). Off: the v2 baseline — every candidate is written as confirmed.
+  consistency: true
   # On: inferences and event participants follow the current evidence on every read.
   # Off: the forward-only baseline — once counted, an event and its players stay counted.
   cascade: true
@@ -33,6 +36,17 @@ events:
   window_overlap: 5
   sample_fps: 2                        # frames per second shown to the event analyzer (§6.3)
   replay_lookback: 90                  # W: a replayed event happened within W s before its window (§6.5)
+  # A live candidate's interval is its second ± this (§5.2). A substitution takes longer: the
+  # board goes up well before the players swap (30 s apart in Man City - Chelsea).
+  live_margin: {default: 10, substitution: 45}
+
+# Consistency check (DESIGN.md §6.4); seconds are match time within a half.
+consistency:
+  kickoff_gap: 60                      # two goals by one team closer than this cannot both hold
+  card_gap: 60                         # one player carded twice within this is checked
+  pair_window: 60                      # a foul's restart follows within this; a free kick's infringement precedes it
+  missing_wait: 150                    # a missing partner is judged only this long after the event (window + latency)
+  substitution_limit: 3                # per team; 2015-16 Premier League
 
 perception:
   detection:

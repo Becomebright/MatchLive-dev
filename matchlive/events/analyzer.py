@@ -33,6 +33,13 @@ class Candidate:
     evidence: tuple[float, ...]             # seconds of the frames the model cites
     replay: bool                            # seen in a replay, so it happened earlier
 
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Candidate":
+        # The inverse of the __dict__ dump scripts/run_events.py writes: JSON turned the
+        # tuples into lists.
+        return cls(d["type"], d["team"], d["second"],
+                   tuple((role, tuple(key)) for role, key in d["participants"]), tuple(d["evidence"]), d["replay"])
+
 
 @dataclass(frozen=True)
 class Request:
@@ -57,8 +64,12 @@ shot, goal, yellow_card, red_card, foul, substitution, penalty, free_kick, offsi
 - participants: {{"role", "id"}} with the P-ID. "player" is the main actor (shooter, scorer,
   booked player, fouler, taker); a foul may add "fouled"; a substitution uses "out" and "in".
   Leave out anyone without an ID label; never invent IDs.
-- replay: true if you see the event only in a replay (slow motion, a repeat from another
-  angle, a replay graphic) — a replay shows something that happened before it.
+- replay: true if the event is shown in a replay rather than live. A replay repeats a moment
+  that already happened: slow motion; the same moment again from another camera angle; a
+  cut back to an attack right after a stoppage (a goal, a foul, a save) with players
+  celebrating, arguing or waiting in between; a scoreboard that already shows the result of
+  the goal being shown. If the same action appears twice in these frames, report it once,
+  at its live frame.
 - frame: the frame number where the event happens (or is best seen, for a replay);
   evidence_frames: the frame numbers that show it.
 Report nothing that is not visible; an empty list is a valid answer.

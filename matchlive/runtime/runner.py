@@ -17,6 +17,7 @@ import numpy as np
 from matchlive.common.cache import ROLE_CODE, cache_path, iter_frames, save_perception
 from matchlive.common.match import Match
 from matchlive.common.types import Detection, Track
+from matchlive.memory.store import MatchMemory
 from matchlive.perception.detection import RFDETRDetector, to_detections
 from matchlive.perception.identity import IdentityResolver, kit_color, kit_lab, roster_index
 from matchlive.perception.jersey import NUM_LABELS, UNREADABLE, JerseyReader, crop_upper_body, label_to_number
@@ -159,4 +160,29 @@ def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.nd
                 numbers.append(label_to_number(label) if clear else None)
             out[frame_idx] = (tracks, None if carrier is None else carrier.key, numbers)
     return out
+
+
+def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[dict]]) -> MatchMemory:
+    """Offline run of the event loop (DESIGN.md §6.10) from cached analyzer answers.
+
+    `results` maps half -> the windows written by scripts/run_events.py (window, call_id,
+    latency, candidates with their voted players). Each window's answer takes effect at
+    its window end + the measured latency, so ops enter memory in knowledge-time order as
+    they would live; the missing-partner constraints are judged as time passes.
+    """
+    from matchlive.events.analyzer import Candidate
+    from matchlive.events.consistency import ConsistencyChecker
+
+    mem = MatchMemory(match.metadata["players"], cascade=config["loop"]["cascade"])
+    checker = ConsistencyChecker(config)
+    arrivals = sorted(((half, r["window"][1] + r["latency"]), half, r)
+                      for half, rows in results.items() for r in rows if "candidates" in r)
+    for t_known, half, r in arrivals:
+        checker.tick(mem, t_known)
+        for i, c in enumerate(r["candidates"]):
+            checker.propose(mem, t_known, half, tuple(r["window"]), Candidate.from_dict(c),
+                            f"obs:{r['call_id']}#{i}", c["players"])
+    # After the final whistle every missing partner has had its chance.
+    checker.tick(mem, (3, 0.0))
+    return mem
 
