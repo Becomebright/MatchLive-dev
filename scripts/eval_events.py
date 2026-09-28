@@ -46,6 +46,16 @@ def clock_to_time(s: str) -> tuple[int, float]:
     return int(half), int(minutes) * 60 + float(seconds)
 
 
+def ground_truth(match_dir) -> list[dict]:
+    """The scored events of Labels-caption_with_gt.json: type, time (half, second), the
+    involved players' hashes and the caption label."""
+    with open(match_dir / "Labels-caption_with_gt.json") as f:
+        anns = json.load(f)["annotations"]
+    return [{"type": GT_TYPE[a["label"]], "time": clock_to_time(a["gt_gameTime"] or a["gameTime"]),
+             "players": [p["hash"] for p in a["involved_players"]], "label": a["label"]}
+            for a in anns if a["label"] in GT_TYPE]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--match", required=True)
@@ -56,11 +66,7 @@ def main():
     config = load_config()
     W = config["events"]["replay_lookback"]
     match = Match(config, args.match)
-    with open(match.dir / "Labels-caption_with_gt.json") as f:
-        anns = json.load(f)["annotations"]
-    truth = [{"type": GT_TYPE[a["label"]], "time": clock_to_time(a["gt_gameTime"] or a["gameTime"]),
-              "players": [p["hash"] for p in a["involved_players"]], "label": a["label"]}
-             for a in anns if a["label"] in GT_TYPE]
+    truth = ground_truth(match.dir)
 
     # Proposals: candidates merged per type. A live one covers [t - tol, t + tol]; a replay
     # one covers [window start - W, t]. Candidates are merged when their spans overlap.

@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from matchlive.common.types import Track
+from matchlive.memory.types import EVENT_TYPES
 from matchlive.perception.visualization import draw_ids
 
 
@@ -118,7 +119,7 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
         lines.append(f"{pid}: {who}")
     t0, t1 = window
     text = INSTRUCTIONS.format(
-        window=f"half {half}, {_clock(t0)}-{_clock(t1)} of the half video",
+        window=f"half {half}, {clock(t0)}-{clock(t1)} of the half video",
         home=teams["home"], away=teams["away"], home_kit=kits["home"][0], away_kit=kits["away"][0],
         n=len(frames), fps=sample_fps)
     text += "\n\nPlayer IDs:\n" + "\n".join(lines or ["(none tracked)"])
@@ -132,7 +133,7 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
         # 960x540 keeps the ID labels legible; JPEG keeps the request small.
         ok, jpg = cv2.imencode(".jpg", cv2.resize(image, (960, 540), interpolation=cv2.INTER_AREA),
                                [cv2.IMWRITE_JPEG_QUALITY, 80])
-        parts += [f"Frame {k} ({_clock(second)})", jpg.tobytes()]
+        parts += [f"Frame {k} ({clock(second)})", jpg.tobytes()]
     return Request(parts,
                    {pid: (half, *key) for key, pid in pid_of.items()},
                    [second for second, _ in frames])
@@ -141,19 +142,11 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
 def parse_candidates(text: str, request: Request) -> list[Candidate]:
     """The model's JSON answer -> candidates. Anything malformed is dropped rather than
     guessed: an unknown type or frame drops the event, an unknown ID drops the participant."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`").removeprefix("json").strip()
-    try:
-        events = json.loads(text).get("events", [])
-    except (json.JSONDecodeError, AttributeError):
-        return []
+    events = parse_json(text).get("events", [])
     n = len(request.seconds)
     out = []
     for e in events if isinstance(events, list) else []:
-        if not isinstance(e, dict) or e.get("type") not in (
-                "shot", "goal", "yellow_card", "red_card", "foul", "substitution",
-                "penalty", "free_kick", "offside", "corner"):
+        if not isinstance(e, dict) or e.get("type") not in EVENT_TYPES:
             continue
         frame = e.get("frame")
         if not isinstance(frame, int) or not 1 <= frame <= n:
@@ -169,7 +162,19 @@ def parse_candidates(text: str, request: Request) -> list[Candidate]:
     return out
 
 
-def _clock(second: float) -> str:
+def parse_json(text: str) -> dict:
+    """A model's JSON answer as a dict ({} if it is not one); a ```json fence is tolerated."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`").removeprefix("json").strip()
+    try:
+        answer = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return answer if isinstance(answer, dict) else {}
+
+
+def clock(second: float) -> str:
     return f"{int(second // 60):02d}:{second % 60:04.1f}"
 
 

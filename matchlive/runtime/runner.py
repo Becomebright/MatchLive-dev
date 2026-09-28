@@ -162,27 +162,92 @@ def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.nd
     return out
 
 
-def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[dict]]) -> MatchMemory:
+def observations(results: dict[int, list[dict]]) -> dict[str, dict]:
+    """What produced each observation id ("obs:<call id>#<i>"): its analyzer window and candidate."""
+    return {f"obs:{r['call_id']}#{i}": {"window": r["window"], "candidate": c}
+            for rows in results.values() for r in rows for i, c in enumerate(r.get("candidates", []))}
+
+
+def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[dict]],
+                  decide=None) -> tuple[MatchMemory, list[dict]]:
     """Offline run of the event loop (DESIGN.md §6.10) from cached analyzer answers.
 
     `results` maps half -> the windows written by scripts/run_events.py (window, call_id,
-    latency, candidates with their voted players). Each window's answer takes effect at
-    its window end + the measured latency, so ops enter memory in knowledge-time order as
-    they would live; the missing-partner constraints are judged as time passes.
+    latency, candidates with their voted players). Each window's answer takes effect at its
+    window end + the measured latency, so ops enter memory in knowledge-time order as they
+    would live; the missing-partner constraints are judged as time passes.
+
+    Every case the consistency check opens goes to the arbiter at once (event-level
+    conflicts escalate at k=1, DESIGN.md §6.4); its verdict takes effect at the case's
+    opening time + the arbiter's latency, unless that is past the deadline. The arbiter is
+    `decide(mem, case, packet, t) -> Decision | None` — by default the API arbiter; None
+    leaves the case open (e.g. to evaluate the consistency check alone); scripts/run_arbiter.py
+    passes cached subagent verdicts. With loop.arbiter off, the newest belief of each case is
+    rejected instead. Returns memory and one record per case the arbiter decided.
     """
+    import heapq
+    import itertools
+
+    from matchlive.arbiter.agent import Arbiter, build_packet
+    from matchlive.arbiter.verdict import apply_verdict, reject_newest
+    from matchlive.common.api import APIClient
     from matchlive.events.analyzer import Candidate
     from matchlive.events.consistency import ConsistencyChecker
+    from matchlive.runtime.evidence import EvidenceTools
 
     mem = MatchMemory(match.metadata["players"], cascade=config["loop"]["cascade"])
     checker = ConsistencyChecker(config)
-    arrivals = sorted(((half, r["window"][1] + r["latency"]), half, r)
-                      for half, rows in results.items() for r in rows if "candidates" in r)
-    for t_known, half, r in arrivals:
-        checker.tick(mem, t_known)
-        for i, c in enumerate(r["candidates"]):
-            checker.propose(mem, t_known, half, tuple(r["window"]), Candidate.from_dict(c),
-                            f"obs:{r['call_id']}#{i}", c["players"])
-    # After the final whistle every missing partner has had its chance.
-    checker.tick(mem, (3, 0.0))
-    return mem
+    tools = EvidenceTools(config, match)          # loads perception only when first asked
+    if decide is None:
+        client = APIClient(config["api"], config["paths"]["cache"])
+        arbiter = Arbiter(config["arbiter"], lambda parts: client.generate(parts, json_output=True))
 
+        def decide(mem, case, packet, t):
+            return arbiter.decide(packet, lambda tool, args: tools.call(mem, t, tool, args))
+    sources = observations(results)
+
+    # One timeline: analyzer answers arriving, and verdicts taking effect.
+    order = itertools.count()
+    queue = [((half, r["window"][1] + r["latency"]), next(order), "answer", (half, r))
+             for half, rows in results.items() for r in rows if "candidates" in r]
+    queue.append(((3, 0.0), next(order), "whistle", None))       # after the final whistle
+    heapq.heapify(queue)
+    n_seen, records = 0, []
+    while queue:
+        t, _, kind, payload = heapq.heappop(queue)
+        if kind == "verdict":
+            record, decision, t_bound = payload
+            if mem.cases[record["case"]].status == "open":
+                record["void"] = apply_verdict(
+                    mem, t, record["case"], decision.verdict, decision.evidence_ids, t_bound,
+                    config["events"]["live_margin"],
+                    lambda key: len(tools.track_frames(key, t_bound)) > 0,
+                    lambda a, b: tools.cooccur(a, b, t_bound))
+            continue
+        checker.tick(mem, t)
+        if kind == "answer":
+            half, r = payload
+            for i, c in enumerate(r["candidates"]):
+                checker.propose(mem, t, half, tuple(r["window"]), Candidate.from_dict(c),
+                                f"obs:{r['call_id']}#{i}", c["players"])
+        # Case ids are handed out in order, so the new cases are the ones past n_seen.
+        new, n_seen = list(mem.cases.values())[n_seen:], len(mem.cases)
+        for case in new:
+            if not config["loop"]["arbiter"]:
+                reject_newest(mem, t, case.case_id)
+                continue
+            packet = build_packet(mem, case, t, sources, match.metadata, config["arbiter"]["context"])
+            decision = decide(mem, case, packet, t)
+            if decision is None:
+                continue
+            record = {"case": case.case_id, "constraint": case.constraint, "opened": t,
+                      "calls": decision.calls, "latency": decision.latency, "verdict": decision.verdict,
+                      "evidence": len(decision.evidence_ids), "void": decision.note or None}
+            records.append(record)
+            if decision.verdict is None:
+                continue
+            if decision.latency > config["arbiter"]["deadline"]:
+                record["void"] = "past the deadline"
+                continue
+            heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
+    return mem, records

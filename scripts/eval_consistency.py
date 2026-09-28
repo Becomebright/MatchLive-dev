@@ -18,7 +18,7 @@ import argparse
 import json
 from collections import Counter
 
-from eval_events import GT_TYPE, clock_to_time   # scripts/eval_events.py: ground-truth parsing
+from eval_events import ground_truth   # scripts/eval_events.py
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
 from matchlive.memory.types import Event
@@ -36,7 +36,8 @@ def main():
     match = Match(config, args.match)
     run_dir = config["paths"]["outputs"] / "events" / args.match / args.run
     results = {h: [json.loads(line) for line in open(run_dir / f"half{h}.jsonl")] for h in (1, 2)}
-    mem = replay_events(config, match, results)
+    # The consistency check alone: every case is left open (the arbiter is evaluated separately).
+    mem, _ = replay_events(config, match, results, decide=lambda *_: None)
 
     events = {eid: e for eid, e in mem.entries.items() if isinstance(e, Event) and mem.status(eid) != "retracted"}
     n_cand = sum(len(r.get("candidates", [])) for rows in results.values() for r in rows)
@@ -45,12 +46,11 @@ def main():
     print("cases per constraint: " + ", ".join(f"{k} {v}" for k, v in
                                                Counter(c.constraint for c in mem.cases.values()).most_common()))
 
-    with open(match.dir / "Labels-caption_with_gt.json") as f:
-        anns = json.load(f)["annotations"]
+    truth = ground_truth(match.dir)
     in_case = {m for c in mem.cases.values() if c.status == "open" for m in c.members}
     print(f"\n{'type':13s} {'true':>5s} {'entries':>8s} {'on truth':>9s} {'extra':>6s} {'extra in case':>14s} {'confirmed':>10s}")
     for ty in ("goal", "yellow_card", "substitution"):
-        times = [clock_to_time(a["gt_gameTime"] or a["gameTime"]) for a in anns if GT_TYPE.get(a["label"]) == ty]
+        times = [t["time"] for t in truth if t["type"] == ty]
         ents = [eid for eid, e in events.items() if e.type == ty]
         # One entry per true event: the narrowest covering entry (a live sighting before a
         # replay's wide interval), nearest first; every other entry is extra.

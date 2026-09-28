@@ -15,6 +15,10 @@ from typing import Any
 
 Time = tuple[int, float]                        # (half, second of that half's video)
 
+# v2's ten event classes; the analyzer asks for these and verdicts may only add these.
+EVENT_TYPES = ("shot", "goal", "yellow_card", "red_card", "foul", "substitution",
+               "penalty", "free_kick", "offside", "corner")
+
 
 @dataclass(frozen=True)
 class Participant:
@@ -32,9 +36,7 @@ class Participant:
 
 @dataclass(frozen=True)
 class Event:
-    # type: one of v2's ten classes — "shot", "goal", "yellow_card", "red_card", "foul",
-    # "substitution", "penalty", "free_kick", "offside", "corner".
-    type: str
+    type: str                                   # one of EVENT_TYPES
     # "home" | "away" | None. For a goal it is the side credited with it, own goals
     # included, so the score is a plain count per team.
     team: str | None

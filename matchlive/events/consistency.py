@@ -81,9 +81,8 @@ class ConsistencyChecker:
         if not self.enabled:
             return mem.add_entry(t_known, event, Justification(obs_id, "observation", True))
 
-        events = _events(mem)
-        matches = [eid for eid, e in events
-                   if e.type == event.type and _overlaps(e.t_interval, interval) and _same_team(e, event)]
+        events = live_events(mem)
+        matches = matching(events, event)
         if len(matches) == 1:
             eid = matches[0]
             # Two claims about one event disagree when they name different identified players
@@ -180,7 +179,7 @@ class ConsistencyChecker:
         event (so the partner's window has been analysed and its result has arrived)."""
         if not self.enabled:
             return
-        events = _events(mem)
+        events = live_events(mem)
         cased = {(m, c.constraint) for c in mem.cases.values() for m in c.members}
         for eid, e in events:
             constraint = PARTNERS.get(e.type, (None, None, None))[2]
@@ -190,7 +189,14 @@ class ConsistencyChecker:
                 mem.open_case(t_known, [eid], constraint)
 
 
-def _events(mem: MatchMemory) -> list[tuple[str, Event]]:
+def matching(events: list[tuple[str, Event]], event: Event) -> list[str]:
+    """Step 1 (DESIGN.md §6.4): the entries among `events` that a sighting of `event` belongs
+    to — same type and half, overlapping time, compatible team."""
+    return [eid for eid, e in events
+            if e.type == event.type and _overlaps(e.t_interval, event.t_interval) and _same_team(e, event)]
+
+
+def live_events(mem: MatchMemory) -> list[tuple[str, Event]]:
     """The event entries that still stand (not retracted)."""
     return [(eid, e) for eid, e in mem.entries.items() if isinstance(e, Event) and mem.status(eid) != "retracted"]
 

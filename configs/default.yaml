@@ -19,6 +19,9 @@ loop:
   # On: proposals are matched to existing entries and checked against the constraints
   # (DESIGN.md §6.4). Off: the v2 baseline — every candidate is written as confirmed.
   consistency: true
+  # On: conflict cases go to the arbiter (DESIGN.md §6.6). Off: the newest belief in a
+  # conflict is rejected outright.
+  arbiter: true
   # On: inferences and event participants follow the current evidence on every read.
   # Off: the forward-only baseline — once counted, an event and its players stay counted.
   cascade: true
@@ -47,6 +50,18 @@ consistency:
   pair_window: 60                      # a foul's restart follows within this; a free kick's infringement precedes it
   missing_wait: 150                    # a missing partner is judged only this long after the event (window + latency)
   substitution_limit: 3                # per team; 2015-16 Premier League
+
+# Arbiter (DESIGN.md §6.6); calls go through the `api` section's model.
+arbiter:
+  max_rounds: 4                        # model calls per case; no verdict by then = the case stays open
+  max_requests: 2                      # tool requests served per round
+  max_frames: 16                       # frames per get_frames
+  crops: 8                             # pictures per get_track_crops
+  deadline: 300                        # s of match time: a verdict arriving later is void (the case stays open)
+  context: 90                          # s around the members within which other events are listed
+  # Verdicts from the arbiter subagent (scripts/run_arbiter.py) have no measured API latency;
+  # they take effect this many seconds after the case opened (DESIGN.md §6.10 allows a fixed value).
+  fixed_latency: 30
 
 perception:
   detection:
