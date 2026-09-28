@@ -14,14 +14,16 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
-from matchlive.common.cache import ROLE_CODE, cache_path, save_perception
+from matchlive.common.cache import ROLE_CODE, cache_path, iter_frames, save_perception
 from matchlive.common.match import Match
-from matchlive.common.types import Detection
-from matchlive.perception.detection import RFDETRDetector
-from matchlive.perception.identity import kit_color
-from matchlive.perception.jersey import NUM_LABELS, JerseyReader, crop_upper_body
+from matchlive.common.types import Detection, Track
+from matchlive.memory.store import MatchMemory
+from matchlive.perception.detection import RFDETRDetector, to_detections
+from matchlive.perception.identity import IdentityResolver, kit_color, kit_lab, roster_index
+from matchlive.perception.jersey import NUM_LABELS, UNREADABLE, JerseyReader, crop_upper_body, label_to_number
 from matchlive.perception.shots import ShotDetector
-from matchlive.perception.tracking import PlayerTracker
+from matchlive.perception.tracking import PlayerTracker, select_ball
+from matchlive.perception.visualization import nearest_to_ball
 
 
 class MatchRunner:
@@ -125,3 +127,62 @@ class MatchRunner:
                     "p99": float(np.percentile(ms, 99)), "max": float(ms.max()),
                     "share_over_40": float((ms > 40).mean())}
         return arrays, {"ms_per_frame": {k: 1000 * v / n for k, v in timing.items()}, "total_ms": total_ms}
+
+
+def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.ndarray],
+                   keep: set[int]) -> dict[int, tuple[list[Track], tuple | None, list[str | None]]]:
+    """Replay identity voting over a half's raw perception cache, streaming in frame order
+    (identities at frame t use only frames <= t), and keep frames `keep`:
+    frame_idx -> (tracks with team / player_id, the key of the track nearest the ball or
+    None, the number read clearly off each track in this frame or None). Frames without
+    tracks or detections are absent.
+
+    Phase 2 votes over the whole squad (the §7 loop.state_to_perception baseline); the
+    on-pitch roster from memory comes with that switch in phase 4.
+    """
+    roster = roster_index(match.metadata["players"])
+    resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.metadata["jersey_colors"]))
+    min_ball = config["perception"]["ball"]["min_score"]
+    min_prob = config["perception"]["identity"]["jersey_min_prob"]
+    out = {}
+    for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
+        tracks = resolver.update(frame_idx, tracks, jersey, color, roster, confirmed={})
+        if frame_idx in keep:
+            ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), min_ball)
+            ball_point = None if ball is None else (ball.bbox_ltwh[0] + ball.bbox_ltwh[2] / 2,
+                                                    ball.bbox_ltwh[1] + ball.bbox_ltwh[3])
+            carrier = nearest_to_ball(tracks, ball_point)
+            # "Clearly read" uses the same bar as a jersey vote (identity.jersey_min_prob).
+            numbers = []
+            for probs in jersey:
+                label = -1 if np.isnan(probs[0]) else int(np.argmax(probs))
+                clear = label not in (-1, UNREADABLE) and probs[label] >= min_prob
+                numbers.append(label_to_number(label) if clear else None)
+            out[frame_idx] = (tracks, None if carrier is None else carrier.key, numbers)
+    return out
+
+
+def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[dict]]) -> MatchMemory:
+    """Offline run of the event loop (DESIGN.md §6.10) from cached analyzer answers.
+
+    `results` maps half -> the windows written by scripts/run_events.py (window, call_id,
+    latency, candidates with their voted players). Each window's answer takes effect at
+    its window end + the measured latency, so ops enter memory in knowledge-time order as
+    they would live; the missing-partner constraints are judged as time passes.
+    """
+    from matchlive.events.analyzer import Candidate
+    from matchlive.events.consistency import ConsistencyChecker
+
+    mem = MatchMemory(match.metadata["players"], cascade=config["loop"]["cascade"])
+    checker = ConsistencyChecker(config)
+    arrivals = sorted(((half, r["window"][1] + r["latency"]), half, r)
+                      for half, rows in results.items() for r in rows if "candidates" in r)
+    for t_known, half, r in arrivals:
+        checker.tick(mem, t_known)
+        for i, c in enumerate(r["candidates"]):
+            checker.propose(mem, t_known, half, tuple(r["window"]), Candidate.from_dict(c),
+                            f"obs:{r['call_id']}#{i}", c["players"])
+    # After the final whistle every missing partner has had its chance.
+    checker.tick(mem, (3, 0.0))
+    return mem
+

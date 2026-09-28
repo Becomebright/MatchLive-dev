@@ -160,7 +160,7 @@ class MatchMemory:
         """The player behind each participant of an event (None if not yet identified)."""
         if not self.cascade and entry_id in self._counted_once:
             return self._counted_once[entry_id]
-        return _players(self.entries[entry_id], self.track_players() if track_players is None else track_players)
+        return resolve_players(self.entries[entry_id], self.track_players() if track_players is None else track_players)
 
     def counted_events(self) -> dict[str, tuple[Event, tuple[str | None, ...]]]:
         """The events the rule inferences count, each with its participants' players."""
@@ -170,7 +170,7 @@ class MatchMemory:
 
     def _confirmed_events(self) -> dict[str, tuple[Event, tuple[str | None, ...]]]:
         track_players = self.track_players()
-        return {entry_id: (e, _players(e, track_players)) for entry_id, e in self.entries.items()
+        return {entry_id: (e, resolve_players(e, track_players)) for entry_id, e in self.entries.items()
                 if isinstance(e, Event) and self.status(entry_id) == "confirmed"}
 
     # ---- queries (DESIGN.md §5.5) ----
@@ -192,7 +192,7 @@ class MatchMemory:
         return View(mem, event_time)
 
 
-def _players(event: Event, track_players: Mapping[tuple, str]) -> tuple[str | None, ...]:
+def resolve_players(event: Event, track_players: Mapping[tuple, str]) -> tuple[str | None, ...]:
     # A participant named directly wins; otherwise its track's confirmed identity, if any.
     return tuple(p.player_id or track_players.get(p.track_key) for p in event.participants)
 

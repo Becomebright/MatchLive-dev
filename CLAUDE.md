@@ -32,8 +32,8 @@ model weights and data come from: see `docs/SETUP.md`.
   and record them in `docs/SETUP.md`.
 - Model weights and match data sync through the private HF dataset repo
   `Becomebright/MatchLive-assets` (`docs/SETUP.md` §3); upload any new file other machines need there.
-- API keys are read from environment variables (loaded from the gitignored `.env`); never
-  hardcode them.
+- API keys are read from environment variables (`GOOGLE_API_KEY` for the Gemini API, named in
+  `configs/` `api.api_key_env`); never hardcode them or store them in a file in the repo.
 - Behaviour tests: `conda run -n matchlive pytest tests/`. Visual checks: `conda run -n matchlive
   python scripts/<name>.py`, writing into `outputs/`.
 - Diagrams: `mmdc` (mermaid-cli, via nvm Node) renders the Mermaid blocks in `DESIGN.md`; Chinese
