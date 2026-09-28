@@ -77,6 +77,12 @@ Rule with writes, each citing the evidence ids ("ev1", ...) that show it:
   [{{"role": "player", "track": [1, 40, 7]}}], "evidence": [...]}}: an event that happened but nobody reported.
 - {{"op": "identity", "track": [1, 40, 7], "player": "<roster hash>", "evidence": [...]}}: who a track is.
 Support the entries you find to be right as well as rejecting the wrong ones. An empty action list dismisses the case.
+
+How to tell a replay: live play is shown from the main wide broadcast camera. Ball-in-play action shown from any
+other angle — behind the goal, a high tactical camera, pitch level, a tight tracking shot, slow motion — is a replay
+of something that already happened, usually shown during the stoppage after it. Close-ups of players' faces and
+reactions, the coach or the bench, and set-piece preparation (the ball being placed, a wall forming) are live. A
+replay is never a new event: find the live moment it repeats.
 Only rule on what the evidence shows; if it cannot be told, ask for more evidence or leave the actions empty.
 
 Answer with JSON only, either

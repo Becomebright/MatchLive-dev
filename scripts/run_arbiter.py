@@ -11,9 +11,10 @@ its verdict there. Verdicts change memory, so later cases can change or appear: 
 until no case is pending.
 
 Case and entry ids are handed out in order, so one verdict that adds an entry renumbers every
-later one. The key is therefore the hash of the packet with each entry id replaced by the
-entry's first observation (stable across runs: it names an analyzer call) and the case id
-dropped; a cached verdict's entry ids are translated through the memory saved with it.
+later one. The key is therefore the hash of the arbiter's instructions and the packet, with
+each entry id replaced by the entry's first observation (stable across runs: it names an
+analyzer call) and the case id dropped; a cached verdict's entry ids are translated through
+the memory saved with it.
 
 Prints the cases (with verdicts or why none applied), the pending ones, and the outcome on
 the types the captions cover completely.
@@ -69,7 +70,7 @@ def main():
     pending = []
 
     def decide(mem, case, packet, t):
-        case_dir = root / case_key(mem, packet)
+        case_dir = root / case_key(mem, packet, instructions(arb, 1))
         verdict_path = case_dir / "verdict.json"
         if verdict_path.exists():
             log = case_dir / "evidence.jsonl"
@@ -115,9 +116,10 @@ def first_obs(mem, entry_id):
     return mem.justifications[entry_id][0][1].obs_id
 
 
-def case_key(mem, packet):
-    """Hash of the packet with entry ids replaced by their first observation and the case id dropped."""
-    text = re.sub(r"^Case C\d+", "Case", packet)
+def case_key(mem, packet, prompt=""):
+    """Hash of the packet with entry ids replaced by their first observation and the case id
+    dropped, plus the arbiter's instructions (a new prompt is a new verdict)."""
+    text = prompt + re.sub(r"^Case C\d+", "Case", packet)
     text = re.sub(r"verdict:C\d+", "verdict", text)
     text = re.sub(r"\b[EI]\d+\b", lambda m: first_obs(mem, m.group()) if m.group() in mem.entries else m.group(), text)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
