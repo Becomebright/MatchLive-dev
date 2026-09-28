@@ -34,12 +34,15 @@ def call(client: APIClient, request, window, players_of):
     for attempt in range(4):
         try:
             result = client.generate(request.parts, json_output=True)
+            # One line per attempt as it happens, so the error rate can be watched live.
+            print(f"ok {window} {result.latency:.1f}s{' cached' if result.cached else ''}", flush=True)
             return {"window": window, "call_id": result.call_id, "model": result.model,
                     "latency": result.latency, "cached": result.cached,
                     "candidates": [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
                                    for c in parse_candidates(result.text, request)]}
         except Exception as e:  # noqa: BLE001 — any API failure is retried the same way
             error = f"{type(e).__name__}: {e}"
+            print(f"error {window} attempt {attempt + 1}: {error[:150]}", flush=True)
             time.sleep(10 * 2 ** attempt)
     return {"window": window, "error": error}
 
