@@ -197,6 +197,8 @@ def _from_tool_calls(message) -> str:
     if not calls:
         return ""
     args = [json.loads(c.arguments or "{}") for c in calls]
-    if len(calls) == 1 and calls[0].name in ("verdict", "answer"):
-        return json.dumps({"verdict": args[0]} if calls[0].name == "verdict" else {"answer": args[0].get("answer")})
-    return json.dumps({"requests": [{"tool": c.name, "args": a} for c, a in zip(calls, args)]})
+    # Some endpoints prefix the name with a namespace ("default:get_frames", "ToolSet.get_frames").
+    names = [c.name.split(":")[-1].split(".")[-1] for c in calls]
+    if len(calls) == 1 and names[0] in ("verdict", "answer"):
+        return json.dumps({"verdict": args[0]} if names[0] == "verdict" else {"answer": args[0].get("answer")})
+    return json.dumps({"requests": [{"tool": n, "args": a} for n, a in zip(names, args)]})
