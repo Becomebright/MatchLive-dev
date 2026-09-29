@@ -8,7 +8,8 @@ measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share call
 inputs are identical.
 
 The API key is read from the environment variable named in the config (never from a
-file in the repo); it is only needed when a call misses the cache.
+file in the repo); it is only needed when a call misses the cache. Without it a miss
+raises NoAPIKey, so a replay from a shared cache either reproduces the cached run or stops.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
+
+
+class NoAPIKey(RuntimeError):
+    """A request missed the cache and there is no API key to make it: never retried or skipped."""
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,10 @@ class APIClient:
             with open(path) as f:
                 d = json.load(f)
             return APIResult(call_id, d["text"], d["model"], d["latency"], cached=True)
+        if not os.environ.get(self.config["api_key_env"]):
+            # Replaying from a shared cache needs no key; a request the cache lacks means the
+            # run has diverged from the cached one, which must stop the run, not be retried.
+            raise NoAPIKey(f"no cached answer for request {call_id} and {self.config['api_key_env']} is not set")
 
         from google import genai
         from google.genai import types

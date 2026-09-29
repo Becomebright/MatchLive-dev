@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
-from matchlive.common.api import APIClient
+from matchlive.common.api import APIClient, NoAPIKey
 from matchlive.common.cache import load_perception
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
@@ -29,22 +29,20 @@ from matchlive.runtime.runner import MatchRunner, resolve_frames
 
 
 def call(client: APIClient, request, window, players_of):
-    # Transient API errors (rate limits, timeouts) are retried with backoff; a window that
-    # still fails is recorded as failed rather than stopping the whole half.
-    for attempt in range(4):
-        try:
-            result = client.generate(request.parts, json_output=True)
-            # One line per attempt as it happens, so the error rate can be watched live.
-            print(f"ok {window} {result.latency:.1f}s{' cached' if result.cached else ''}", flush=True)
-            return {"window": window, "call_id": result.call_id, "model": result.model,
-                    "latency": result.latency, "cached": result.cached,
-                    "candidates": [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
-                                   for c in parse_candidates(result.text, request)]}
-        except Exception as e:  # noqa: BLE001 — any API failure is retried the same way
-            error = f"{type(e).__name__}: {e}"
-            print(f"error {window} attempt {attempt + 1}: {error[:150]}", flush=True)
-            time.sleep(10 * 2 ** attempt)
-    return {"window": window, "error": error}
+    # The client retries transient errors (api.max_attempts); a window that still fails is
+    # recorded as failed rather than stopping the whole half.
+    try:
+        result = client.generate(request.parts, json_output=True)
+    except NoAPIKey:
+        raise
+    except Exception as e:  # noqa: BLE001 — out of retries
+        print(f"error {window}: {type(e).__name__}: {str(e)[:150]}", flush=True)
+        return {"window": window, "error": f"{type(e).__name__}: {e}"}
+    print(f"ok {window} {result.latency:.1f}s{' cached' if result.cached else ''}", flush=True)
+    return {"window": window, "call_id": result.call_id, "model": result.model,
+            "latency": result.latency, "cached": result.cached,
+            "candidates": [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
+                           for c in parse_candidates(result.text, request)]}
 
 
 def main():

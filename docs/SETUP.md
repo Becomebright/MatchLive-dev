@@ -7,8 +7,7 @@ relative to the repo root; see `CLAUDE.md` for the repo layout and day-to-day co
 
 ```bash
 git clone https://github.com/Becomebright/MatchLive.git
-cd MatchLive
-git checkout dev
+cd MatchLive                 # `main` is the stable implementation; `dev` carries ongoing work
 ```
 
 ## 2. Environment
@@ -33,17 +32,21 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - The LLM API (Gemini, through the `google-genai` SDK) needs `export GOOGLE_API_KEY=...` in
   your shell profile; the key is never stored in the repo. Cached API responses (`cache/api/`)
-  replay without it.
+  replay without it; without a key, a request the cache lacks stops the run (`NoAPIKey`) instead
+  of calling the API, so a replay either reproduces the recorded run or fails loudly.
 
-## 3. Model weights and match data (private)
+## 3. Model weights, match data and caches (private)
 
-Both live in one private Hugging Face dataset repo, `Becomebright/MatchLive-assets`, laid out like
-the repo root, so a single download drops every file in place:
+All three live in one private Hugging Face dataset repo, `Becomebright/MatchLive-assets`, laid out
+like the repo root, so a single download drops every file in place:
 ```bash
 hf auth login                 # a token with read access to the repo
 hf download Becomebright/MatchLive-assets --repo-type dataset --local-dir . \
-    --include "dataset/*" --include "checkpoints/*"
+    --include "dataset/*" --include "checkpoints/*" --include "cache/*"
 ```
+The caches make the results reproducible without a GPU or an API key (README, "Streaming QA"):
+the raw perception cache replaces a GPU pass over each half, and the API cache holds every
+model answer the recorded runs received. Leave `cache/*` out to start from scratch.
 One pattern per `--include` (a second bare pattern is read as a filename). `--include` skips the
 HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 `.cache/huggingface/` (gitignored).
@@ -56,6 +59,13 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | jersey reader (`perception.jersey.model`) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
+| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 830M | raw perception cache (`matchlive/common/cache.py`), written by `scripts/run_perception.py`, read by every later stage |
+| `cache/api/<call id>.json` | 21M | cached Gemini answers: event analyzer, arbiter and QA calls of the recorded runs |
+
+The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
+settings), taken from file contents, so a download matches as long as those are unchanged; a
+change to any of them makes the pipeline look for a new file. `cache/trt/` (TensorRT engines) is
+specific to the GPU and is never shared.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
 elsewhere:
