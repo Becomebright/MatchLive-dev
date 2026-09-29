@@ -4,7 +4,8 @@ MatchRunner makes one pass over a half video and writes the raw perception cache
 (matchlive.common.cache). run_live() then plays the whole match forward on one match clock:
 identity voting frame by frame (fed by memory, loop.state_to_perception), the event analyzer
 on every fixed window, the consistency check and the arbiter — each API answer taking effect
-at its issue time + measured latency, as it would live. replay_events() is the older loop over
+at its issue time + measured latency, as it would live. run_commentary() drives the commentary
+over a live run's memory on the same clock. replay_events() is the older loop over
 analyzer answers cached by scripts/run_events.py, kept for the subagent arbiter
 (scripts/run_arbiter.py).
 """
@@ -269,7 +270,8 @@ def off_roster_obs(half: int, key: tuple, player: str) -> str:
     return f"read:{half}/{key[0]}/{key[1]}:{player}"
 
 
-def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> MatchMemory:
+def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrupt=None,
+             until: tuple[int, float] | None = None) -> MatchMemory:
     """The whole match, live, from the raw perception cache (DESIGN.md §6.10 offline mode).
 
     One match clock drives everything, half by half and frame by frame:
@@ -290,6 +292,10 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
     (each window's call and candidates), cases.json (each arbitrated case), and
     perceived_half<h>.pkl (second -> the frame as the analyzer was told about it, at the
     sampled seconds, for the QA's current view). Returns memory.
+
+    For the error-injection experiment (DESIGN.md §10 phase 4): `corrupt(half, window, candidates)`
+    returns the candidates the analyzer is taken to have answered instead (e.g. without a
+    substitution, or with a card given to the wrong player); `until` stops the match clock there.
     """
     import heapq
     import itertools
@@ -376,6 +382,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
             settle(when)
 
     for half in (1, 2):
+        if until is not None and half > until[0]:
+            break
         arrays, meta = load_perception(cache_path(config, match.video_path(half), match.name, half, 0, None))
         fps = meta["fps"]
         duration = meta["n_frames"] / fps
@@ -408,7 +416,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         images[wanted[video["pos"]]] = image
                 video["pos"] += 1
             shown = [(s, images[s]) for s in grid if window[0] <= s < window[1] and s in images]
-            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"])
+            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"], ev["ask_confidence"])
             # The player behind each track as last seen in the window — what the model was told.
             players_of = {(half, *tr.key): tr.player_id
                           for s, _ in shown for tr in perceived.get(s, ((), None, ()))[0] if tr.player_id}
@@ -422,6 +430,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                 return
             cands = [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
                      for c in parse_candidates(result.text, request)]
+            if corrupt is not None:
+                cands = corrupt(half, window, cands)
             r = {"half": half, "window": window, "call_id": result.call_id, "model": result.model,
                  "latency": result.latency, "cached": result.cached, "candidates": cands}
             windows_log.write(json.dumps(r) + "\n")
@@ -438,6 +448,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
         w = 0
         for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
             second = frame_idx / fps
+            if until is not None and (half, second) > until:
+                break
             while w < len(windows) and windows[w][1] <= second:
                 fire(windows[w])
                 w += 1
@@ -463,15 +475,71 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         arbitrate(mem.cases[case_id], (half, second))
             if frame_idx in wanted:
                 perceived[wanted[frame_idx]] = frame_view(config, tracks, jersey, det)
-        while w < len(windows):
+        while w < len(windows) and (until is None or (half, windows[w][1]) <= until):
             fire(windows[w])
             w += 1
         cap.release()
         with open(out_dir / f"perceived_half{half}.pkl", "wb") as f:
             pickle.dump(perceived, f)
 
-    # After the final whistle: the last answers and verdicts land.
-    advance((3, 0.0))
+    # After the final whistle (or at `until`): the last answers and verdicts land.
+    advance((3, 0.0) if until is None else until)
     windows_log.close()
     (out_dir / "cases.json").write_text(json.dumps(records, indent=1, default=str))
     return mem
+
+
+def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client) -> list[dict]:
+    """Live commentary (DESIGN.md §6.9) over a live run (run_live's output in `run_dir`), on the
+    match clock.
+
+    Commentary only reads memory, and memory as known at t is a prefix of the run's op log
+    (DESIGN.md §5.4), so driving it from the log after the run gives the lines a live run would
+    have given with the same latencies. Every `tick` s while nobody is speaking, the policy looks
+    at memory as known then; what it picks goes to the generator (one model call through
+    `client`), whose line is ready at the decision time + the call's latency and keeps the
+    commentator busy for as long as it takes to say. A call that fails after its retries loses
+    the line, as it would live.
+
+    Returns one record per line: its kind, entry, text, the entry's status and the players the
+    line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
+    (t_event), and the call id and latency.
+    """
+    import json
+
+    from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
+    from matchlive.common.api import NoAPIKey
+    from matchlive.events.analyzer import clock
+
+    cfg = config["commentary"]
+    mem = MatchMemory(match.prematch["players"], log_path=run_dir / "ops.jsonl", cascade=config["loop"]["cascade"])
+    windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
+    sources = {f"obs:{w['call_id']}#{i}": {"window": w["window"], "candidate": c}
+               for w in windows for i, c in enumerate(w.get("candidates", []))}
+    half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
+    policy = CommentaryPolicy(cfg, match.prematch, sources)
+    commentator = Commentator(cfg, lambda parts: client.generate(parts, json_output=True))
+    lines: list[dict] = []
+    for half in (1, 2):
+        t, free = 0.0, 0.0
+        while t <= half_end[half]:
+            if t >= free:
+                item = policy.decide(mem.at((half, t)))
+                if item is not None:
+                    try:
+                        text, latency, call_id = commentator.line(item, [line["text"] for line in lines])
+                    except NoAPIKey:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
+                        print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
+                        t += cfg["tick"]
+                        continue
+                    ready = t + latency
+                    free = ready + speaking_time(text, cfg["words_per_second"])
+                    policy.said(item, text, (half, ready))
+                    lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
+                                  "text": text, "t_decide": (half, t), "t_ready": (half, ready),
+                                  "t_event": item.t_event, "facts": item.facts, "call_id": call_id, "latency": latency})
+                    print(f"{half}H {clock(ready)} [{item.kind}] {text}", flush=True)
+            t += cfg["tick"]
+    return lines

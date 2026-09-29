@@ -41,6 +41,25 @@ qa:
   max_frames: 16                       # frames per get_frames / get_current_view
   current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
 
+# Live commentary (DESIGN.md §6.9); lines are generated through the `api` section's model.
+commentary:
+  tick: 2                              # s between the policy's looks at memory while nobody is speaking
+  recent: 120                          # s: an event is news only if it happened at most this long ago
+  recap_after: 90                      # s without a line before a recap
+  # News, most important first; the policy airs one line at a time, so the tail is filler.
+  announce: [goal, red_card, penalty, yellow_card, substitution, injury, shot, corner, offside, free_kick, foul]
+  # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
+  # (An event aired as fact is corrected whatever its type.)
+  confirm: [goal, red_card, penalty, yellow_card, substitution]
+  max_words: 25                        # per line
+  language: English
+  history: 5                           # the last lines shown to the generator, so it does not repeat itself
+  words_per_second: 2.5                # speaking rate: a line keeps the commentator busy this long
+  # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
+  # 30-90 s memory needs to learn of an event and the generation call. A line is shown with the
+  # video at (ready time - output_delay), but never before the event it speaks of is on screen.
+  output_delay: 60
+
 # LLM API (DESIGN.md §2 principle 9), called through the google.genai SDK; responses cached
 # under paths.cache/<cache>, keyed by model + request.
 api:
@@ -60,6 +79,9 @@ events:
   # board goes up well before the players swap (30 s apart in Man City - Chelsea). Treatment of
   # an injured player can run over a minute and be reported by several windows.
   live_margin: {default: 10, substitution: 45, injury: 60}
+  # The confidence-gating baseline only (DESIGN.md §10): ask the analyzer for a 0-1 confidence
+  # per event. The method never does (DESIGN.md §4); false keeps the request, and its cache, as is.
+  ask_confidence: false
 
 # Consistency check (DESIGN.md §6.4); seconds are match time within a half.
 consistency:
@@ -71,6 +93,10 @@ consistency:
   # A conflict from per-frame perception goes to the arbiter only once this many independent
   # sources back it (DESIGN.md §6.4): an off-pitch player's number read on k different tracks.
   off_roster_k: 3
+  # The confidence-gating baseline (DESIGN.md §10, MemTX-like), null for the method: a candidate
+  # whose analyzer confidence reaches this is written as confirmed, any other is dropped; no
+  # statuses from justifications, no constraints, no cases.
+  gate: null
 
 # Arbiter (DESIGN.md §6.6); calls go through the `api` section's model.
 arbiter:
