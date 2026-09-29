@@ -1,6 +1,6 @@
 """The confidence-gating baseline (DESIGN.md §10, MemTX-like) on the candidates of a live run.
 
-    python scripts/run_gate.py [--source confidence] [--gates 0.5 0.7 0.8 0.9] [--match M ...]
+    python scripts/run_gate.py [--source confidence] [--gates 0.85 0.9 0.95 0.98] [--match M ...]
 
 The source run (scripts/run_live.py --set events.ask_confidence=true) is the full system whose
 event analyzer also gave a 0-1 confidence per event. Its analyzer answers are replayed through the
@@ -29,7 +29,9 @@ MATCHES = ("2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United", "2016-09-16 - 2
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="confidence", help="live run whose analyzer gave confidences")
-    ap.add_argument("--gates", nargs="+", type=float, default=[0.5, 0.7, 0.8, 0.9])
+    # The analyzer's confidences cluster at 0.85-0.95 (203 of 313 are 0.95), so gates below 0.85 keep
+    # everything and 0.98 keeps almost nothing.
+    ap.add_argument("--gates", nargs="+", type=float, default=[0.85, 0.9, 0.95, 0.98])
     ap.add_argument("--match", action="append", default=None, help="default: both benchmark matches")
     args = ap.parse_args()
 
