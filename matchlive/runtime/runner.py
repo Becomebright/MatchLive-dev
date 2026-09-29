@@ -240,7 +240,7 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
             half, r = payload
             for i, c in enumerate(r["candidates"]):
                 checker.propose(mem, t, half, tuple(r["window"]), Candidate.from_dict(c),
-                                f"obs:{r['call_id']}#{i}", c["players"])
+                                f"obs:{r['call_id']}#{i}", c["players"], sources)
         # Case ids are handed out in order, so the new cases are the ones past n_seen.
         new, n_seen = list(mem.cases.values())[n_seen:], len(mem.cases)
         for case in new:
@@ -378,7 +378,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
             half, r = payload
             for i, c in enumerate(r["candidates"]):
                 checker.propose(mem, when, half, tuple(r["window"]), Candidate.from_dict(c),
-                                f"obs:{r['call_id']}#{i}", c["players"])
+                                f"obs:{r['call_id']}#{i}", c["players"], sources)
             settle(when)
 
     for half in (1, 2):

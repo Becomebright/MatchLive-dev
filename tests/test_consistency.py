@@ -30,16 +30,21 @@ class Feed:
 
     def __init__(self, mem, checker):
         self.mem, self.checker, self.n = mem, checker, 0
+        self.sources = {}           # observation id -> its window and candidate, as the runtime keeps them
 
-    def __call__(self, t_known, type, team, second, replay=False, window=None, **players):
+    def __call__(self, t_known, type, team, second, replay=False, window=None, call=None, **players):
         # players: role=(track_id, player_id or None); tracks live in shot 1 of half 1.
+        # Each candidate is its own analyzer call over its own window (by default the 30 s around
+        # it), unless `call` names a call it shares with another candidate.
         self.n += 1
         parts = tuple((role, (1, 1, track)) for role, (track, _) in players.items())
         cand = Candidate(type, team, second, parts, (second,), replay)
         window = window or (second - 15, second + 15)
+        obs = f"obs:{call or f'call{self.n}'}#{self.n}"
+        self.sources[obs] = {"window": window, "candidate": {"second": second}}
         self.checker.tick(self.mem, (1, t_known))
-        return self.checker.propose(self.mem, (1, t_known), 1, window, cand, f"obs:call{self.n}#0",
-                                    [p for _, p in players.values()])
+        return self.checker.propose(self.mem, (1, t_known), 1, window, cand, obs,
+                                    [p for _, p in players.values()], self.sources)
 
 
 def cases(mem, constraint=None):
@@ -48,20 +53,35 @@ def cases(mem, constraint=None):
 
 def test_second_sighting_joins_the_entry_and_confirms_it():
     feed = setup(); mem, checker = feed.mem, feed.checker
-    g = feed(130, "goal", "home", 100, player=(7, "h1"))
+    g = feed(130, "goal", "home", 100, window=(75, 105), player=(7, "h1"))
     assert mem.status(g) == "pending"                          # one source is not enough
-    # The next window overlaps and sees the same goal: same entry, now confirmed.
-    assert feed(155, "goal", "home", 104, player=(7, "h1")) == g
+    # The next window sees it again after the frames the two share: same entry, now confirmed.
+    assert feed(155, "goal", "home", 108, window=(100, 130), player=(7, "h1")) == g
     assert mem.status(g) == "confirmed"
     assert mem.at((1, 160)).score == {"home": 1, "away": 0}
+
+
+def test_the_same_frames_seen_twice_are_one_source():
+    # Adjacent windows share 5 s of frames: a moment inside them is read twice, and a misreading
+    # would be reported twice (DESIGN.md §6.4). So is whatever one call reports.
+    feed = setup(); mem, checker = feed.mem, feed.checker
+    g = feed(130, "goal", "home", 102, window=(75, 105))
+    assert feed(155, "goal", "home", 103, window=(100, 130)) == g
+    assert mem.status(g) == "pending"
+    f = feed(300, "foul", "away", 250, window=(245, 275), call="one")
+    k = feed(300, "free_kick", "home", 270, window=(245, 275), call="one")
+    assert mem.status(f) == "pending" and mem.status(k) == "pending"
+    # Still a pair: neither misses its partner.
+    checker.tick(mem, (1, 1000))
+    assert not cases(mem, "restart_after_foul") and not cases(mem, "infringement_before_free_kick")
 
 
 def test_event_is_confirmed_even_when_its_actor_is_unidentified():
     # Whether it happened and who did it are separate beliefs (DESIGN.md §6.4): two windows
     # agreeing on a goal confirm it, and the score counts it, with no scorer identified.
     feed = setup(); mem, checker = feed.mem, feed.checker
-    g = feed(130, "goal", "away", 100, player=(7, None))
-    feed(155, "goal", "away", 104, player=(9, None))
+    g = feed(130, "goal", "away", 100, window=(75, 105), player=(7, None))
+    feed(155, "goal", "away", 108, window=(100, 130), player=(9, None))
     assert mem.status(g) == "confirmed"
     assert mem.at((1, 160)).score == {"home": 0, "away": 1}
 
@@ -149,7 +169,7 @@ def test_missing_partners_open_cases_only_after_the_wait():
 def test_substitution_must_take_a_player_off_the_pitch_and_on_from_the_bench():
     feed = setup(); mem, checker = feed.mem, feed.checker
     feed(130, "substitution", "home", 100, out=(1, "h1"), **{"in": (2, "h4")})
-    feed(160, "substitution", "home", 100, out=(1, "h1"), **{"in": (2, "h4")})   # confirmed
+    feed(160, "substitution", "home", 125, window=(110, 140), out=(1, "h1"), **{"in": (2, "h4")})   # confirmed
     assert not cases(mem, "substitution_invalid")
     # h4 is already on and h1 already off: the same swap again is impossible.
     # (Lineups follow confirmed entries only, so the first swap had to be confirmed.)
@@ -160,7 +180,7 @@ def test_substitution_must_take_a_player_off_the_pitch_and_on_from_the_bench():
 def test_player_who_left_cannot_take_part_again():
     feed = setup(); mem, checker = feed.mem, feed.checker
     feed(130, "substitution", "home", 100, out=(1, "h1"), **{"in": (2, "h4")})
-    feed(160, "substitution", "home", 100, out=(1, "h1"), **{"in": (2, "h4")})   # confirmed
+    feed(160, "substitution", "home", 125, window=(110, 140), out=(1, "h1"), **{"in": (2, "h4")})   # confirmed
     shot = feed(600, "shot", "home", 570, player=(3, "h1"))
     assert [c.members for c in cases(mem, "player_off_pitch")] == [(shot,)]
     # A card is not play: a substituted player can still be booked.
