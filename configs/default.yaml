@@ -46,6 +46,7 @@ commentary:
   tick: 2                              # s between the policy's looks at memory while nobody is speaking
   recent: 120                          # s: an event is news only if it happened at most this long ago
   recap_after: 120                     # s without a line before a recap
+  echo: 60                             # s: a minor event this close to an aired one it repeats is not news (= consistency.pair_window)
   # News, most important first; the policy airs one line at a time, so the tail is filler.
   announce: [goal, red_card, penalty, yellow_card, substitution, injury, shot, corner, offside, free_kick, foul]
   # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
@@ -66,7 +67,8 @@ api:
   api_key_env: GOOGLE_API_KEY          # read from the environment, never stored in a file
   model: gemini-3.8-flash
   cache: api
-  max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most 120 s)
+  max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most max_backoff)
+  max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
 
 events:

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # The main ablations of DESIGN.md §7 on both benchmark matches: each run turns one loop switch
-# off, plays the match live (scripts/run_live.py) and answers the streaming-QA benchmark in tools
-# mode (scripts/run_qa.py). Runs go in parallel, one process per (match, ablation); logs in
-# outputs/live/logs/<match tag>_<run>.log.
+# off and plays the match live (scripts/run_live.py); runs go in parallel, one process per
+# (match, ablation); logs in outputs/live/logs/<match tag>_<run>.log. Score them with
+# scripts/eval_memory.py (no model call); the QA benchmark (scripts/run_qa.py --run <name>) can be
+# answered on any of them later.
 #
 #   bash scripts/run_ablations.sh [run ...]              # default: all five, both matches
 #   MATCH_TAGS="mu" bash scripts/run_ablations.sh no_arbiter
 #
-# A request is retried up to 40 times (backoff capped at 120 s): on an overloaded API the default
-# 8 attempts lose windows, and a lost window would make the runs differ by API luck, not by switch.
+# A request is retried up to 40 times, waiting at most 20 s in between: on an overloaded API the
+# default 8 attempts lose windows, and a lost window would make the runs differ by API luck, not
+# by switch; the 503s come back fast, so a short wait gets through sooner.
 set -u
 cd "$(dirname "$0")/.."
 # The editable install may point at another checkout (e.g. from a git worktree): use this one.
@@ -31,12 +33,9 @@ RUNS=("$@")
 mkdir -p outputs/live/logs
 for tag in ${MATCH_TAGS:-mu liv}; do
   for run in "${RUNS[@]}"; do
-    log="outputs/live/logs/${tag}_${run}.log"
-    (
-      conda run -n matchlive --no-capture-output python scripts/run_live.py --match "${MATCH[$tag]}" --name "$run" \
-        --set "${SET[$run]}" --set api.max_attempts=40 \
-      && conda run -n matchlive --no-capture-output python scripts/run_qa.py --match "${MATCH[$tag]}" --run "$run" --mode tools
-    ) > "$log" 2>&1 &
+    conda run -n matchlive --no-capture-output python scripts/run_live.py --match "${MATCH[$tag]}" --name "$run" \
+      --set "${SET[$run]}" --set api.max_attempts=40 --set api.max_backoff=20 \
+      > "outputs/live/logs/${tag}_${run}.log" 2>&1 &
   done
 done
 wait

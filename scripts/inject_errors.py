@@ -181,8 +181,10 @@ def main():
     jobs = [(name, trial, args.horizon, args.set, args.name)
             for name in args.match or MATCHES for trial in trials(Match(base, name), args.kind)]
     if not args.summary:
+        # A trial already played (its trial.json written) is not played again.
+        todo = [j for j in jobs if not (base["paths"]["outputs"] / "live" / j[0] / args.name / j[1]["id"] / "trial.json").exists()]
         with ProcessPoolExecutor(args.workers) as pool:
-            for out_dir in pool.map(run_trial, jobs):
+            for out_dir in pool.map(run_trial, todo):
                 print("done", out_dir, flush=True)
 
     print(f"\n{'match':10s} {'trial':22s} {'corrupted':>9s} {'right after (s)':>16s} {'full: right after':>18s} "

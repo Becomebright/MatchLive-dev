@@ -119,6 +119,20 @@ def test_pending_goal_is_aired_again_once_confirmed():
     assert (item.kind, item.entry, item.named) == ("confirmation", eid, {"player": "h1"})
 
 
+def test_one_incident_is_aired_once_but_a_card_always_is():
+    mem = MatchMemory(PLAYERS)
+    foul = mem.add_entry(T(100), Event("foul", "away", ((1, 90), (1, 100))), seen("live#1"))
+    p = policy()
+    assert air(p, mem, 100).entry == foul
+    # The free kick after it, and the same foul reported again, only repeat what was said.
+    mem.add_entry(T(130), Event("free_kick", "home", ((1, 115), (1, 125))), seen("live#2"))
+    mem.add_entry(T(131), Event("foul", "away", ((1, 95), (1, 105))), seen("live#3"))
+    assert p.decide(mem.at(T(131))) is None
+    # A card for the foul is news of its own.
+    card = mem.add_entry(T(140), Event("yellow_card", "away", ((1, 100), (1, 110))), seen("live#4", sufficient=False))
+    assert p.decide(mem.at(T(140))).entry == card
+
+
 def test_hedged_minor_event_retracted_is_not_worth_a_correction():
     mem = MatchMemory(PLAYERS)
     shot = mem.add_entry(T(100), Event("shot", "away", ((1, 90), (1, 100))), seen("live#1", sufficient=False))

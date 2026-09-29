@@ -95,7 +95,7 @@ class APIClient:
                 if attempt + 1 == self.config.get("max_attempts", 1):
                     raise
                 print(f"api retry {attempt + 1}: {type(e).__name__}: {str(e)[:120]}", flush=True)
-                time.sleep(min(5 * 2 ** attempt, 120))
+                time.sleep(min(5 * 2 ** attempt, self.config.get("max_backoff", 120)))
         d = {"text": text, "model": resp.model_version or model, "latency": latency,
              "usage": resp.usage_metadata.model_dump(mode="json") if resp.usage_metadata else None}
         path.parent.mkdir(parents=True, exist_ok=True)

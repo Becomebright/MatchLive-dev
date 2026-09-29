@@ -10,13 +10,16 @@ it is asked (the runtime asks every `tick` s while no line is being spoken) it p
   2. confirmation  a goal, card, substitution or penalty aired while pending is now confirmed, or
                    its player has since been identified;
   3. news          the most important event memory has learnt of that has not been aired and
-                   happened within the last `recent` s;
+                   happened within the last `recent` s — except a minor one that only echoes an
+                   event aired within `echo` s (the same kind by the same side, or the other half
+                   of one incident: a foul and its free kick, a foul and its card);
   4. background    the first line of each half: the teams, the score, pre-match facts;
   5. recap         after `recap_after` s without a line: the score and how the match is going;
   6. silence.
 Wording follows each event's status (DESIGN.md §6.9): a confirmed event names its players (those
-memory has identified); a pending one names only the team and is hedged ("looks like ..."). What
-was said about each entry is kept, so a later change of status or player is noticed and aired.
+memory has identified); a pending one names only the team — and a pending goal, card, penalty or
+substitution is also hedged ("looks like ..."). What was said about each entry is kept, so a later
+change of status or player is noticed and aired.
 
 The generator makes one cached model call per line from the material alone (facts, the wording
 rule, the last lines said) and may not add names or facts. It holds no memory; the runtime lends
@@ -32,11 +35,20 @@ from matchlive.events.analyzer import parse_json
 from matchlive.memory.types import Time
 from matchlive.memory.view import EventRecord, View
 
-# How an event type is spoken of; the material says it in these words.
+# How an event type is spoken of; the material says it in these words, with its side where known.
 EVENT_WORDS = {"goal": "goal", "shot": "shot", "yellow_card": "yellow card", "red_card": "red card",
                "foul": "foul", "substitution": "substitution", "penalty": "penalty", "free_kick": "free kick",
                "offside": "offside", "corner": "corner", "injury": "stoppage for an injured player"}
-ROLE_WORDS = {"player": "player", "in": "coming on", "out": "going off", "fouled": "fouled player"}
+WITH_TEAM = {"goal": "a goal for {team}", "shot": "a shot by {team}", "yellow_card": "a yellow card for a {team} player",
+             "red_card": "a red card for a {team} player", "foul": "a foul by {team}",
+             "substitution": "a {team} substitution", "penalty": "a penalty for {team}",
+             "free_kick": "a free kick for {team}", "offside": "{team} caught offside", "corner": "a corner for {team}",
+             "injury": "play stopped for an injured {team} player"}
+# The roles a line may name: the main actors only (a fouled player is often the fouler misread).
+ROLE_WORDS = {"player": "player", "in": "coming on", "out": "going off"}
+# Two events that are one incident on the pitch: aired once, the other is an echo.
+INCIDENTS = {frozenset(p) for p in (("foul", "free_kick"), ("offside", "free_kick"), ("foul", "penalty"),
+                                    ("foul", "yellow_card"), ("foul", "red_card"))}
 
 
 @dataclass
@@ -70,6 +82,7 @@ class CommentaryPolicy:
         self.players = {p["hash"]: p for p in prematch["players"]}
         self.aired: dict[str, Aired] = {}
         self.last_line: Time | None = None
+        self.last_recap: list[str] = []           # the last recap's facts, bar the clock
         self.halves_opened: set[int] = set()
 
     # ---- deciding ----
@@ -103,7 +116,7 @@ class CommentaryPolicy:
         # 3. News: the most important unaired event of the last `recent` s.
         fresh = [r for r in records.values() if r.entry_id not in self.aired and r.status != "retracted"
                  and r.event.type in announce and r.event.t_interval[1][0] == now[0]
-                 and now[1] - r.event.t_interval[1][1] <= self.cfg["recent"]]
+                 and now[1] - r.event.t_interval[1][1] <= self.cfg["recent"] and not self._echoes(r, records)]
         if fresh:
             r = min(fresh, key=lambda r: (announce.index(r.event.type), -r.event.t_interval[1][1]))
             return self._event_item(view, r, "news", self._named(r))
@@ -112,9 +125,11 @@ class CommentaryPolicy:
         if now[0] not in self.halves_opened:
             return self._background(view)
 
-        # 5. A recap after a silence.
+        # 5. A recap after a silence, if the state has moved on since the last one.
         if self.last_line is None or self.last_line[0] != now[0] or now[1] - self.last_line[1] >= self.cfg["recap_after"]:
-            return self._recap(view)
+            item = self._recap(view)
+            if item.facts[1:] != self.last_recap:
+                return item
         return None
 
     def said(self, item: Item, text: str, now: Time) -> None:
@@ -122,8 +137,27 @@ class CommentaryPolicy:
         self.last_line = now
         if item.kind == "background":
             self.halves_opened.add(now[0])
+        if item.kind == "recap":
+            self.last_recap = item.facts[1:]
         if item.entry is not None:
             self.aired[item.entry] = Aired(item.status, dict(item.named), text)
+
+    def _echoes(self, r: EventRecord, records: Mapping[str, EventRecord]) -> bool:
+        """A minor event within `echo` s of an aired one that it only repeats: the same kind by the
+        same side (often one event reported twice), or the other half of one incident. A goal,
+        card, penalty or substitution is always news."""
+        e = r.event
+        if e.type in self.cfg["confirm"]:
+            return False
+        for eid in self.aired:
+            o = records.get(eid)
+            if o is None or o.status == "retracted" or o.event.t_interval[1][0] != e.t_interval[1][0] \
+                    or abs(o.event.t_interval[1][1] - e.t_interval[1][1]) > self.cfg["echo"]:
+                continue
+            same_side = o.event.team is None or e.team is None or o.event.team == e.team
+            if (o.event.type == e.type and same_side) or frozenset((o.event.type, e.type)) in INCIDENTS:
+                return True
+        return False
 
     # ---- material ----
 
@@ -135,20 +169,23 @@ class CommentaryPolicy:
 
     def _event_item(self, view: View, r: EventRecord, kind: str, named: dict[str, str],
                     before: Aired | None = None) -> Item:
-        e, teams = r.event, self.prematch["teams"]
+        e = r.event
         half, second, replay = self._when(view, r)
-        facts = [f"Event: {EVENT_WORDS[e.type]}" + (f" by {teams[e.team]}" if e.team else "")
-                 + f", {self._clock(half, second)}" + (" (seen in a replay)" if replay else "") + "."]
+        # News is about the play on screen now: no minute, and the score only with a goal.
+        facts = [f"Event: {self._phrase(e)}" + (" (seen in a replay)" if replay else "") + "."]
         for role, pid in named.items():
-            facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid, view)}")
-        facts.append(self._score(view))
+            facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid, view, e.type)}")
+        if e.type == "goal":
+            facts.append(self._score(view))
         if r.status == "confirmed":
             facts.append(f"Status: confirmed ({self._support(view, r.entry_id)}).")
-            rule = "State it as fact" + (" and name the player(s) given." if named else "; no player is identified, so name none.")
-        else:
+            rule = "Say it as fact" + (", naming the player(s) given." if named else "; no player is identified, so name none.")
+        elif e.type in self.cfg["confirm"]:
             facts.append("Status: not confirmed yet (seen once so far, or disputed).")
-            rule = ("It is not confirmed: hedge it (\"looks like\", \"it appears\") and name no player — "
-                    "mention only the team.")
+            rule = "It is not confirmed: hedge it (e.g. \"looks like\") and name no player, only the team."
+        else:
+            facts.append("Status: not confirmed yet.")
+            rule = "Name no player, only the team."
         if kind == "confirmation":
             facts.append(f"You said earlier: \"{before.text}\"")
             rule = ("Earlier you mentioned this tentatively or without the player; now it is confirmed: say so"
@@ -156,10 +193,9 @@ class CommentaryPolicy:
         return Item(kind, facts, rule, r.entry_id, r.status, named, (half, second))
 
     def _correction(self, view: View, r: EventRecord, before: Aired, named: dict[str, str], what: str) -> Item:
-        e, teams = r.event, self.prematch["teams"]
+        e = r.event
         half, second, _ = self._when(view, r)
-        facts = [f"You said earlier: \"{before.text}\"",
-                 f"About: {EVENT_WORDS[e.type]}" + (f" by {teams[e.team]}" if e.team else "") + f", {self._clock(half, second)}."]
+        facts = [f"You said earlier: \"{before.text}\"", f"About: {self._phrase(e)}, {self._clock(half, second)}."]
         reason = self._reason(view, r.entry_id)
         if what == "retracted":
             facts.append(f"It turned out not to be right: {reason}")
@@ -171,7 +207,8 @@ class CommentaryPolicy:
                                  f"it was actually {self._player(named[role], view, brief=True)}.")
             facts.append(f"Why: {reason}")
             rule = "Correct the name briefly and plainly (e.g. \"Correction: ...\"), giving the reason."
-        facts.append(self._score(view))
+        if e.type == "goal":
+            facts.append(self._score(view))
         return Item("correction", facts, rule, r.entry_id, r.status, named, (half, second))
 
     def _background(self, view: View) -> Item:
@@ -243,18 +280,24 @@ class CommentaryPolicy:
         teams = self.prematch["teams"]
         return f"Score now: {teams['home']} {view.score['home']}-{view.score['away']} {teams['away']}."
 
-    def _player(self, pid: str, view: View, brief: bool = False) -> str:
+    def _phrase(self, e) -> str:
+        """"a corner for Chelsea"; "a corner" when the side is unknown."""
+        if e.team is None:
+            return f"a {EVENT_WORDS[e.type]}"
+        return WITH_TEAM[e.type].format(team=self.prematch["teams"][e.team])
+
+    def _player(self, pid: str, view: View, ty: str | None = None, brief: bool = False) -> str:
         p = self.players[pid]
-        name = f"#{p['jersey_number']} {p['long_name']} ({self.prematch['teams'][p['team_side']]})"
-        if brief:
-            return name
-        # Background from the pre-match facts and the match so far (DESIGN.md §6.9).
-        extra = [p["position"] or ("substitute" if not p["starting"] else "")]
-        counts = view.player_stats.get(pid)
-        if counts:
-            extra.append("so far in memory: " + ", ".join(f"{n} {EVENT_WORDS[t]}{'s' if n != 1 else ''}"
-                                                          for t, n in counts.items()))
-        return name + "; " + "; ".join(x for x in extra if x)
+        name = f"#{p['jersey_number']} {p['long_name']}"
+        role = p["position"] or ("substitute" if not p["starting"] else "")
+        name += f" ({self.prematch['teams'][p['team_side']]}{', ' + role if role and not brief else ''})"
+        # Background from the match so far (DESIGN.md §6.9): the count of this kind of event,
+        # when it is not the player's first.
+        n = view.player_stats.get(pid, {}).get(ty, 0) if ty else 0
+        if n >= 2 and not brief:
+            nth = f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+            name += f"; his {nth} {EVENT_WORDS[ty]} of the match"
+        return name
 
     @staticmethod
     def _clock(half: int, second: float) -> str:
@@ -272,7 +315,7 @@ PROMPT = """You are the live TV commentator of a football match. Say ONE spoken 
 {language}, made only from the material below.
 - Use only the facts given: never add a player, a number, a time or any detail that is not in the material.
 - {rule}
-- Sound like live commentary, not a report; no hashtags or emojis.
+- Sound like live commentary, not a report: vary how your lines start and are built; no hashtags or emojis.
 
 Your last lines (do not repeat them):
 {history}
