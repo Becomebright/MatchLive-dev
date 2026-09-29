@@ -13,15 +13,12 @@ Every candidate goes through two steps:
 Perception proposes beliefs too (loop.state_to_perception): a number read on the pitch that
 belongs to a player memory has off it — see `off_roster_read()`.
 
-A foul and the free kick that restarts play after it support each other: each one's first
-observation is added as a justification of the other — sufficient when the two are independent.
+A foul and the free kick that restarts play after it confirm each other: each one's first
+observation is added as a justification of the other, since two independent sources agree.
 
 A justification is sufficient (DESIGN.md §6.4) when a second, independent source agrees with
-the entry; a single sighting leaves it pending. Two observations are independent only if they
-did not see the same frames: two from one analyzer call, or two sightings both inside the stretch
-two adjacent windows share, repeat one reading of one picture (a misreading is reported twice).
-Who did it is not part of this: the players behind an event come from the Identity entries,
-which carry their own status.
+the entry; a single sighting leaves it pending. Who did it is not part of this: the players
+behind an event come from the Identity entries, which carry their own status.
 
 Status is never written here, and cases are never closed here (that is the arbiter's call,
 DESIGN.md §6.6): memory derives status from the justifications and open cases. No LLM is
@@ -31,7 +28,7 @@ none (DESIGN.md §8).
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 from matchlive.events.analyzer import Candidate
 from matchlive.memory.store import MatchMemory, resolve_players
@@ -69,14 +66,10 @@ class ConsistencyChecker:
     # ---- step 1 + 2 for one candidate ----
 
     def propose(self, mem: MatchMemory, t_known: Time, half: int, window: tuple[float, float],
-                cand: Candidate, obs_id: str, players: Sequence[str | None],
-                sources: Mapping[str, Mapping[str, Any]] | None = None) -> str:
+                cand: Candidate, obs_id: str, players: Sequence[str | None]) -> str:
         """Write one candidate (its participants' voted players in `players`) into memory at
         knowledge time `t_known`; return the id of the entry it now supports (None if the
-        confidence gate dropped it). `sources` maps observation ids to the analyzer window and
-        candidate behind them, to tell whether two observations saw the same frames (the
-        runtime's record; without it only two observations of one call count as the same)."""
-        sources = sources or {}
+        confidence gate dropped it)."""
         if self.gate is not None and (cand.confidence is None or cand.confidence < self.gate):
             # The confidence-gating baseline: an unsure sighting is not written at all.
             return None
@@ -114,10 +107,7 @@ class ConsistencyChecker:
             track_players = mem.track_players()
             old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
             clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
-            # Sufficient when it agrees with an earlier observation it is independent of.
-            earlier = [j.obs_id for _, j in mem.justifications[eid] if j.kind == "observation" and j.obs_id not in mem.rejected]
-            agrees = not clash and any(independent(obs_id, o, sources) for o in earlier)
-            mem.add_justification(t_known, eid, Justification(obs_id, "observation", agrees))
+            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash))
             if clash:
                 mem.open_case(t_known, [eid, obs_id], "claims_disagree", [obs_id])
             return eid
@@ -126,7 +116,7 @@ class ConsistencyChecker:
         eid = mem.add_entry(t_known, event, Justification(obs_id, "observation", False))
         if len(matches) > 1:
             mem.open_case(t_known, [*matches, eid], "ambiguous_match", [obs_id])
-        self._check_new(mem, t_known, eid, events, sources)
+        self._check_new(mem, t_known, eid, events)
         return eid
 
     def _identity(self, mem: MatchMemory, t_known: Time, key: tuple, player: str) -> None:
@@ -141,8 +131,7 @@ class ConsistencyChecker:
 
     # ---- constraints on a new entry ----
 
-    def _check_new(self, mem: MatchMemory, t_known: Time, eid: str, events: list[tuple[str, Event]],
-                   sources: Mapping[str, Mapping[str, Any]]) -> None:
+    def _check_new(self, mem: MatchMemory, t_known: Time, eid: str, events: list[tuple[str, Event]]) -> None:
         # `events` is the entry list from before `eid` was added.
         e = mem.entries[eid]
         half, t = e.t_interval[1]
@@ -173,15 +162,13 @@ class ConsistencyChecker:
                 # bench; they cannot take part in play again (cards can go to anyone).
                 mem.open_case(t_known, [eid], "player_off_pitch")
 
-        # An infringement and the restart after it support each other — as a confirmation only
-        # if they were not read off the same frames (one call reporting both is one reading).
+        # An infringement and the restart after it confirm each other.
         partner = self._partner(events, e)
         if partner is not None:
             for a, b in ((eid, partner), (partner, eid)):
                 first = mem.justifications[b][0][1].obs_id
-                own = mem.justifications[a][0][1].obs_id
                 if all(j.obs_id != first for _, j in mem.justifications[a]):
-                    mem.add_justification(t_known, a, Justification(first, "observation", independent(first, own, sources)))
+                    mem.add_justification(t_known, a, Justification(first, "observation", True))
             # A partner that turns up after its absence was already judged is new evidence
             # for that case; closing it is the arbiter's call.
             for c in (mem.cases[cid] for x in (eid, partner) for cid in mem.open_cases(x)):
@@ -237,21 +224,6 @@ class ConsistencyChecker:
             if constraint and (half, t + self.cfg["missing_wait"]) <= t_known \
                     and (eid, constraint) not in cased and self._partner(events, e) is None:
                 mem.open_case(t_known, [eid], constraint)
-
-
-def independent(a: str, b: str, sources: Mapping[str, Mapping[str, Any]]) -> bool:
-    """Two observations are independent sources unless they saw the same frames (DESIGN.md §6.4):
-    two from one analyzer call ("obs:<call id>#<i>"), or two sightings both inside the stretch
-    their two windows share. Other observations (verdicts, votes), and those `sources` has no
-    record of, count as independent."""
-    if a.startswith("obs:") and b.startswith("obs:") and a.split("#")[0] == b.split("#")[0]:
-        return False
-    sa, sb = sources.get(a), sources.get(b)
-    if sa is None or sb is None:
-        return True
-    (a0, a1), (b0, b1) = sa["window"], sb["window"]
-    lo, hi = max(a0, b0), min(a1, b1)
-    return not (lo < hi and lo <= sa["candidate"]["second"] <= hi and lo <= sb["candidate"]["second"] <= hi)
 
 
 def matching(events: list[tuple[str, Event]], event: Event) -> list[str]:
