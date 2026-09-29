@@ -1,0 +1,13 @@
+# Only here so `pip install -e .` makes `matchlive` importable from scripts/ and tests/;
+# dependencies are installed as described in docs/SETUP.md, not from this file.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "matchlive"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["matchlive*"]

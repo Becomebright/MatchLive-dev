@@ -1,0 +1,142 @@
+# Default configuration. All paths are relative to the repo root (resolved by
+# matchlive.common.config.load_config).
+
+paths:
+  dataset: dataset/organized_data
+  checkpoints: checkpoints
+  cache: cache
+  outputs: outputs
+  v2: ../live-comment-v2               # the reference implementation (scripts/compare_v2.py)
+
+# Whole-video timestamp of each half's second 0, used only to align with the streaming-QA
+# benchmark (DESIGN.md §4): timestamp = benchmark_offsets[match][half] + second.
+benchmark_offsets:
+  "2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United": {1: 0, 2: 2700}
+  "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool": {1: 0, 2: 2773}
+
+# Loop switches (DESIGN.md §7); each is added in the phase that implements it.
+loop:
+  # On: proposals are matched to existing entries and checked against the constraints
+  # (DESIGN.md §6.4). Off: the v2 baseline — every candidate is written as confirmed.
+  consistency: true
+  # On: conflict cases go to the arbiter (DESIGN.md §6.6). Off: the newest belief in a
+  # conflict is rejected outright.
+  arbiter: true
+  # On: inferences and event participants follow the current evidence on every read.
+  # Off: the forward-only baseline — once counted, an event and its players stay counted.
+  cascade: true
+  # On: a candidate the analyzer saw in a replay gets the interval [window start - W, window
+  # end] (DESIGN.md §6.5). Off: it is taken as a live sighting at the second it was seen.
+  replay: true
+  # On: identity votes only among the players memory has on the pitch and keeps the confirmed
+  # identity entries; a number worn by nobody on the pitch that names an off-pitch player is
+  # evidence for the consistency check. Off: votes over the whole squad (v2).
+  state_to_perception: true
+
+# The streaming-QA agent (DESIGN.md §6.9); calls go through the `api` section's model.
+qa:
+  mode: tools                          # tools | dump_log (the whole event log in one call, v2)
+  max_rounds: 4                        # model calls per question; the last one must answer
+  max_requests: 3                      # tool requests served per round
+  max_frames: 16                       # frames per get_frames / get_current_view
+  current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
+
+# LLM API (DESIGN.md §2 principle 9), called through the google.genai SDK; responses cached
+# under paths.cache/<cache>, keyed by model + request.
+api:
+  api_key_env: GOOGLE_API_KEY          # read from the environment, never stored in a file
+  model: gemini-3.8-flash
+  cache: api
+  max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most 120 s)
+  timeout: 180                         # s per request; a request past it fails and is retried
+
+events:
+  # Fixed windows over the whole half (DESIGN.md §6.2).
+  window_seconds: 30
+  window_overlap: 5
+  sample_fps: 2                        # frames per second shown to the event analyzer (§6.3)
+  replay_lookback: 90                  # W: a replayed event happened within W s before its window (§6.5)
+  # A live candidate's interval is its second ± this (§5.2). A substitution takes longer: the
+  # board goes up well before the players swap (30 s apart in Man City - Chelsea). Treatment of
+  # an injured player can run over a minute and be reported by several windows.
+  live_margin: {default: 10, substitution: 45, injury: 60}
+
+# Consistency check (DESIGN.md §6.4); seconds are match time within a half.
+consistency:
+  kickoff_gap: 60                      # two goals by one team closer than this cannot both hold
+  card_gap: 60                         # one player carded twice within this is checked
+  pair_window: 60                      # a foul's restart follows within this; a free kick's infringement precedes it
+  missing_wait: 150                    # a missing partner is judged only this long after the event (window + latency)
+  substitution_limit: 3                # per team; 2015-16 Premier League
+  # A conflict from per-frame perception goes to the arbiter only once this many independent
+  # sources back it (DESIGN.md §6.4): an off-pitch player's number read on k different tracks.
+  off_roster_k: 3
+
+# Arbiter (DESIGN.md §6.6); calls go through the `api` section's model.
+arbiter:
+  max_rounds: 4                        # model calls per case; no verdict by then = the case stays open
+  max_requests: 2                      # tool requests served per round
+  max_frames: 16                       # frames per get_frames
+  crops: 8                             # pictures per get_track_crops
+  deadline: 300                        # s of match time: a verdict arriving later is void (the case stays open)
+  context: 90                          # s around the members within which other events are listed
+  # Verdicts from the arbiter subagent (scripts/run_arbiter.py) have no measured API latency;
+  # they take effect this many seconds after the case opened (DESIGN.md §6.10 allows a fixed value).
+  fixed_latency: 30
+
+perception:
+  detection:
+    model: rfdetr-l.onnx               # under paths.checkpoints
+    providers: [tensorrt, cuda, cpu]   # tried in this order; unavailable ones are skipped
+    fp16: true                         # TensorRT only
+    trt_cache: trt/rfdetr-l_fp16       # TensorRT engine cache, under paths.cache
+    confidence: 0.15
+
+  shots:
+    # Colour-histogram distance between consecutive frames. 0.3: no false cut on 41k
+    # main-camera frames (match videos) or 36.7k GSR frames; hard cuts between similar
+    # wide views score 0.33-0.5.
+    cut_threshold: 0.3
+
+  jersey:
+    checkpoint: jersey_dinov3_convnext_tiny-20_matches.safetensors   # torch weights, export source
+    model: jersey_dinov3_convnext_tiny-20_matches.onnx         # exported by scripts/export_jersey_onnx.py
+    providers: [tensorrt, cuda, cpu]
+    fp16: true
+    trt_cache: trt/jersey_fp16
+    max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
+
+  identity:
+    # Per-track votes over the cached observations (perception.identity.IdentityResolver).
+    vote_every: 1                      # frames between a track's votes (v2: 15)
+    jersey_min_prob: 0.9               # a number read counts as a vote at this probability
+    min_number_votes: 2                # votes a number needs before it can name the player
+    team_min_margin: 0.2               # (far - near) / (far + near) kit distance to vote a team
+    kit_burn_in: 200                   # outfield colours seen before splitting them into two kits
+    kit_adapt_rate: 0.02               # how far each confident claim moves its cluster centre
+    one_player_per_track: true         # Hungarian assignment within each frame
+
+  ball:
+    # The ball is not tracked: each frame takes its best ball detection above this score
+    # (SoccerNet-GSR: precision 0.84, recall 0.76 at 0.3).
+    min_score: 0.3
+
+  tracking:
+    # One tracker for players and goalkeepers. BoT-SORT beats ByteTrack on SoccerNet-GSR
+    # (HOTA 65.5 vs 63.6, IDSW -52%), all of it from camera-motion compensation
+    # (scripts/eval_tracking_gsr.py).
+    algorithm: botsort                 # botsort | bytetrack
+    # Keyword arguments passed straight to the trackers library class of that name.
+    bytetrack:                         # v2 values
+      lost_track_buffer: 30
+      track_activation_threshold: 0.5
+      minimum_consecutive_frames: 2
+      minimum_iou_threshold: 0.1
+      high_conf_det_threshold: 0.5
+    botsort:                           # library defaults, except cmc_downscale
+      lost_track_buffer: 30
+      track_activation_threshold: 0.7
+      minimum_consecutive_frames: 2
+      high_conf_det_threshold: 0.6
+      enable_cmc: true
+      cmc_downscale: 4                 # 720p -> 320x180 optical flow: same accuracy as 2x, ~40% cheaper
