@@ -15,9 +15,10 @@ from typing import Any
 
 Time = tuple[int, float]                        # (half, second of that half's video)
 
-# v2's ten event classes; the analyzer asks for these and verdicts may only add these.
+# v2's ten event classes plus injury (play stopped for an injured player); the analyzer asks
+# for these and verdicts may only add these.
 EVENT_TYPES = ("shot", "goal", "yellow_card", "red_card", "foul", "substitution",
-               "penalty", "free_kick", "offside", "corner")
+               "penalty", "free_kick", "offside", "corner", "injury")
 
 
 @dataclass(frozen=True)

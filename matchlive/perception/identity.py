@@ -161,16 +161,25 @@ class IdentityResolver:
             out.append(replace(track, team=side_of.get(player, team), player_id=player, identity_source=source))
         return out
 
-    def off_roster_reads(self, teams: Mapping[tuple, str | None],
-                         roster: Mapping[tuple[str, str], str]) -> list[tuple[tuple, str, str, int]]:
-        """(a) Evidence for the consistency check: (track key, team, number, votes) for every
-        number voted at least `min_number_votes` times on a track of known team whose
-        (team, number) is not in `roster`. `teams` maps track key -> team (from the
-        tracks update() returned)."""
-        return [(key, team, number, votes)
-                for key, team in teams.items() if team
-                for number, votes in self.number_votes[key].items()
-                if votes >= self.config["min_number_votes"] and (team, number) not in roster]
+    def off_roster_reads(self, teams: Mapping[tuple, str | None], roster: Mapping[tuple[str, str], str],
+                         squad: Mapping[tuple[str, str], str]) -> list[tuple[tuple, str]]:
+        """(a) Evidence for the consistency check: (track key, player) for every track of known
+        team whose most-voted number (at least `min_number_votes` votes) names a player of the
+        whole `squad` who is not in `roster` (the players on the pitch) — and is worn by nobody
+        on the pitch in either team. A number some player on the pitch wears is far likelier
+        that player with the kit colour misjudged: on the two local benchmark matches, such
+        reads came from ~250 tracks before any substitution, the others almost only after a
+        real one. `teams` maps track key -> team (from the tracks update() returned)."""
+        worn = {number for _, number in roster}
+        out = []
+        for key, team in teams.items():
+            votes = self.number_votes.get(key)
+            if not team or not votes:
+                continue
+            number, n = votes.most_common(1)[0]
+            if n >= self.config["min_number_votes"] and number not in worn and (team, number) in squad:
+                out.append((key, squad[(team, number)]))
+        return out
 
     def _vote_team(self, track: Track, color: np.ndarray) -> None:
         if np.isnan(color[0]):

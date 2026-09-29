@@ -31,7 +31,7 @@ from matchlive.memory.view import View
 class MatchMemory:
     def __init__(self, roster: Iterable[Mapping[str, Any]], log_path: str | Path | None = None,
                  cascade: bool = True):
-        # `roster` is metadata `players`: pre-match facts only (side, starting flag, hash),
+        # `roster` is Match.prematch `players`: pre-match facts only (side, starting flag, hash),
         # so nothing after kick-off leaks into the lineups (DESIGN.md §6.8).
         self.roster: dict[str, Mapping[str, Any]] = {str(p["hash"]): p for p in roster}
         self.cascade = cascade

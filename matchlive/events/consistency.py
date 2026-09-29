@@ -10,6 +10,8 @@ Every candidate goes through two steps:
      those beliefs as members. A missing partner (a foul with no restart after it, a free
      kick with no infringement before it) is only judged once enough match time has passed
      for the partner to have been analysed — see `tick()`.
+Perception proposes beliefs too (loop.state_to_perception): a number read on the pitch that
+belongs to a player memory has off it — see `off_roster_read()`.
 
 A foul and the free kick that restarts play after it confirm each other: each one's first
 observation is added as a justification of the other, since two independent sources agree.
@@ -57,6 +59,7 @@ class ConsistencyChecker:
         self.live_margin = config["events"]["live_margin"]
         self.replay_lookback = config["events"]["replay_lookback"]
         self.enabled = config["loop"]["consistency"]
+        self.replay = config["loop"]["replay"]
 
     # ---- step 1 + 2 for one candidate ----
 
@@ -70,7 +73,8 @@ class ConsistencyChecker:
             if player:
                 self._identity(mem, t_known, key, player)
 
-        if cand.replay:
+        # loop.replay off: the replay flag is ignored and the sighting is taken as live.
+        if cand.replay and self.replay:
             interval = ((half, max(0.0, window[0] - self.replay_lookback)), (half, window[1]))
         else:
             margin = self.live_margin.get(cand.type, self.live_margin["default"])
@@ -170,6 +174,26 @@ class ConsistencyChecker:
                  if o.type in types and o.t_interval[1][0] == half and lo * w <= o.t_interval[1][1] - t <= hi * w
                  and (o.team is None or e.team is None or o.team != e.team)]
         return min(found)[1] if found else None
+
+    # ---- evidence from perception (loop.state_to_perception) ----
+
+    def off_roster_read(self, mem: MatchMemory, t_known: Time, obs_id: str, player: str) -> str | None:
+        """A track keeps reading as `player`, whom memory has off the pitch (the observation
+        `obs_id`, see runtime.runner.off_roster_obs). It contradicts the lineup — a missed
+        substitution, or misreads — so it joins the open off_roster_read case of that player
+        (opening one if there is none) as one more independent source. Returns the case id
+        when the case has just reached `off_roster_k` sources: per-frame perception conflicts
+        go to the arbiter only then, so one misread never does (DESIGN.md §6.4)."""
+        if not self.enabled:
+            return None
+        case = next((c for c in mem.cases.values() if c.status == "open" and c.constraint == "off_roster_read"
+                     and c.members[0].endswith(":" + player)), None)
+        if case is None:
+            case_id = mem.open_case(t_known, [obs_id], "off_roster_read", [obs_id])
+        else:
+            case_id = case.case_id
+            mem.add_evidence(t_known, case_id, [obs_id])
+        return case_id if len(mem.cases[case_id].evidence) == self.cfg["off_roster_k"] else None
 
     # ---- missing-partner constraints, judged once time has passed ----
 

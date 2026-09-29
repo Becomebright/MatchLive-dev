@@ -40,8 +40,11 @@ def main():
     decoded = {f: rest for f, *rest in iter_frames(arrays)}
 
     players = match.metadata["players"]
-    # Phase 0 has no substitution tracking yet, so the whole squad counts as on the pitch.
+    # Phase 0 has no substitution tracking yet, so the whole squad counts as on the pitch;
+    # off-roster reads are reported against the starting XI (what the live loop has before
+    # any substitution).
     roster = roster_index(players)
+    starters = roster_index([p for p in players if p["starting"]])
     resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.metadata["jersey_colors"]))
     team_bgr = kit_bgr(match.metadata["jersey_colors"])
     labels = {p["hash"]: (str(p["jersey_number"]), p["short_name"]) for p in players}
@@ -79,8 +82,8 @@ def main():
     print(f"track boxes: {total} | " + "  ".join(f"{k} {v / total:.3f}" for k, v in sorted(stats.items())))
     for team in ("home", "away"):
         print(f"{team} numbers identified: {sorted(identified[team], key=int)}")
-    off = Counter((team, number) for _, team, number, _ in resolver.off_roster_reads(teams, roster))
-    print("off-roster reads (team, number): tracks", dict(off.most_common(10)))
+    off = Counter(labels[player] for _, player in resolver.off_roster_reads(teams, starters, roster))
+    print("off-roster reads against the starting XI (number, name): tracks", dict(off.most_common(10)))
 
 
 if __name__ == "__main__":

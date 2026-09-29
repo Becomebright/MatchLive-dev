@@ -40,7 +40,7 @@ def main():
     t_bound = next(op.t_known for op in mem.ops if op.kind == "open_case" and op.payload["case_id"] == case.case_id)
     out = config["paths"]["outputs"] / "check_arbiter" / case.case_id
     out.mkdir(parents=True, exist_ok=True)
-    (out / "packet.txt").write_text(build_packet(mem, case, t_bound, observations(results), match.metadata,
+    (out / "packet.txt").write_text(build_packet(mem, case, t_bound, observations(results), match.prematch,
                                                  config["arbiter"]["context"]))
     print(f"\n{case.case_id} opened at {t_bound}; packet -> {out / 'packet.txt'}")
 

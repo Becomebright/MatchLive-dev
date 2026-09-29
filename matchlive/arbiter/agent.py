@@ -55,6 +55,11 @@ RULES = {
     "substitution_invalid": "This substitution does not fit the lineups: the player going off is not on the pitch, "
                             "the player coming on is not on the bench, or the team is past its substitution limit.",
     "player_off_pitch": "A player who was already sent off or substituted takes part in play again.",
+    "off_roster_read": "The shirt number of a player memory has off the pitch (on the bench, substituted or sent off) "
+                       "was read clearly on several tracked players, and nobody on the pitch wears that number: either "
+                       "a substitution was missed (add it), or the reads are wrong. A substitution puts the substitute "
+                       "on the pitch only when both of its players are known: name its tracks with identity writes, or "
+                       "reject its observations and add it again naming the two players.",
 }
 
 INSTRUCTIONS = """You are the arbiter of a live football-match memory. A consistency rule flagged a conflict between
@@ -74,7 +79,9 @@ Rule with writes, each citing the evidence ids ("ev1", ...) that show it:
 - {{"op": "reject", "observation": "obs:...#1", "evidence": [...]}}: an observation is wrong, e.g. a replay taken for a
   new event, a misread number, an event that did not happen.
 - {{"op": "add_event", "type": "free_kick", "team": "home", "half": 1, "second": 1234, "participants":
-  [{{"role": "player", "track": [1, 40, 7]}}], "evidence": [...]}}: an event that happened but nobody reported.
+  [{{"role": "player", "track": [1, 40, 7]}}], "evidence": [...]}}: an event that happened but nobody reported. A
+  participant with no track may name a roster player instead, {{"role": "in", "player": "<roster hash>"}} (e.g. a
+  substitution nobody saw, inferred from the substitute's number being read on the pitch).
 - {{"op": "identity", "track": [1, 40, 7], "player": "<roster hash>", "evidence": [...]}}: who a track is.
 Support the entries you find to be right as well as rejecting the wrong ones. An empty action list dismisses the case.
 
@@ -99,35 +106,53 @@ def instructions(config: Mapping[str, Any], round: int) -> str:
 
 
 def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapping[str, Mapping[str, Any]],
-                 metadata: Mapping[str, Any], context: float) -> str:
+                 prematch: Mapping[str, Any], context: float) -> str:
     """The case as text: `observations` maps an observation id to what produced it (the
     analyzer window and candidate); `context` s around the members lists neighbouring events."""
-    teams, kits = metadata["teams"], metadata["jersey_colors"]
+    teams, kits, sides = prematch["teams"], prematch["jersey_colors"], prematch["sides"]
     view = mem.at(t_bound, known_by=t_bound)
     track_players = mem.track_players()
     lines = [f"Case {case.case_id} — {case.constraint}: {RULES.get(case.constraint, '')}",
              f"The case opened at half {t_bound[0]}, {clock(t_bound[1])}.",
-             f"Home: {teams['home']} ({kits['home'][0]} kit). Away: {teams['away']} ({kits['away'][0]} kit).", "",
-             "Members:"]
+             *(f"{side.capitalize()}: {teams[side]} ({kits[side][0]} kit), defending the goal on the {sides[1][side]} "
+               f"of the main camera's picture in half 1 and on the {sides[2][side]} in half 2." for side in ("home", "away")),
+             "", "Members:"]
     spans = []
     for m in case.members:
         if m not in mem.entries:
-            lines.append(f"- observation {m}: {_observation(m, observations, metadata)}")
+            lines.append(f"- observation {m}: {_observation(m, observations, prematch)}")
             continue
         e = mem.entries[m]
         if isinstance(e, Identity):
-            lines.append(f"- {m}: identity — track {track_name(e.track_key)} is {_player(e.player_id, metadata)}"
+            lines.append(f"- {m}: identity — track {track_name(e.track_key)} is {_player(e.player_id, prematch)}"
                          f" [{mem.status(m)}]")
         else:
             (h, lo), (_, hi) = e.t_interval
             spans.append((h, lo, hi))
             who = ", ".join(f"{p.role} = track {track_name(p.track_key) if p.track_key else '-'}"
-                            f" ({_player(p.player_id or track_players.get(p.track_key), metadata)})"
+                            f" ({_player(p.player_id or track_players.get(p.track_key), prematch)})"
                             for p in e.participants) or "no participants"
             lines.append(f"- {m}: {e.type}, team {e.team}, half {h} {clock(lo)}–{clock(hi)} [{mem.status(m)}]; {who}")
         for t, j in mem.justifications[m]:
             state = "rejected" if j.obs_id in mem.rejected else ("sufficient" if j.sufficient else "insufficient")
-            lines.append(f"    · {j.obs_id} ({j.kind}, {state}): {_observation(j.obs_id, observations, metadata)}")
+            lines.append(f"    · {j.obs_id} ({j.kind}, {state}): {_observation(j.obs_id, observations, prematch)}")
+    # Independent sources merged into the case after it opened and not shown above (e.g. more
+    # tracks reading the same off-pitch player's number).
+    shown = {j.obs_id for m in case.members if m in mem.entries for _, j in mem.justifications[m]}
+    merged = [e for e in dict.fromkeys(case.evidence) if e not in case.members and e not in shown]
+    if merged:
+        lines += ["", "Further observations merged into this case:"]
+        lines += [f"- observation {e}: {_observation(e, observations, prematch)}" for e in merged]
+    if case.constraint == "off_roster_read":
+        # The lineup comes from the substitutions memory holds; show them with their players.
+        lines += ["", "Substitutions memory holds so far:"]
+        for r in view.events(type="substitution"):
+            (h, lo), (_, hi) = r.event.t_interval
+            who = ", ".join(f"{p.role} = track {track_name(p.track_key) if p.track_key else '-'} ({_player(pid, prematch)})"
+                            for p, pid in zip(r.event.participants, r.players)) or "no participants"
+            lines.append(f"- {r.entry_id}: team {r.event.team}, half {h} {clock(lo)}–{clock(hi)} [{r.status}]; {who}")
+        if not view.events(type="substitution"):
+            lines.append("(none)")
     if spans:
         lines += ["", "Other events memory holds nearby:"]
         for r in view.events():
@@ -138,7 +163,7 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
                              f" [{r.status}]")
     lines += ["", "Roster (hash: side, number, name):"]
     lines += [f"- {p['hash']}: {p['team_side']}, #{p['jersey_number']}, {p['short_name']}"
-              + ("" if p["starting"] else " (substitute)") for p in metadata["players"]]
+              + ("" if p["starting"] else " (substitute)") for p in prematch["players"]]
     return "\n".join(lines)
 
 
@@ -172,25 +197,30 @@ class Arbiter:
         return Decision(None, [ev.id for ev in evidence], calls, latency, "out of rounds")
 
 
-def _observation(obs_id: str, observations: Mapping[str, Mapping[str, Any]], metadata: Mapping[str, Any]) -> str:
+def _observation(obs_id: str, observations: Mapping[str, Mapping[str, Any]], prematch: Mapping[str, Any]) -> str:
     if obs_id.startswith("verdict:"):
         return "an earlier arbiter verdict"
     if obs_id.startswith("vote:"):
         return "the number reader's vote on that track"
+    if obs_id.startswith("read:"):
+        # "read:<half>/<shot>/<track>:<player hash>" (runtime.runner.off_roster_obs)
+        key, pid = obs_id.removeprefix("read:").split(":")
+        return (f"the number reader read {_player(pid, prematch)}'s shirt number clearly and repeatedly on track {key}, "
+                f"though memory has that player off the pitch")
     o = observations.get(obs_id)
     if o is None:
         return "(no record)"
     c, (w0, w1) = o["candidate"], o["window"]
-    who = "; ".join(f"{role} = track {track_name(key)} ({_player(pid, metadata)} by the number vote)"
+    who = "; ".join(f"{role} = track {track_name(key)} ({_player(pid, prematch)} by the number vote)"
                     for (role, key), pid in zip(c["participants"], c.get("players", [None] * len(c["participants"]))))
     return (f"the analyzer, watching {clock(w0)}–{clock(w1)}, reported {c['type']} by {c['team']} at "
             f"{clock(c['second'])}{' in a replay' if c['replay'] else ' live'}" + (f"; {who}" if who else ""))
 
 
-def _player(pid: str | None, metadata: Mapping[str, Any]) -> str:
+def _player(pid: str | None, prematch: Mapping[str, Any]) -> str:
     if not pid:
         return "unidentified"
-    p = next((p for p in metadata["players"] if p["hash"] == pid), None)
+    p = next((p for p in prematch["players"] if p["hash"] == pid), None)
     return f"{p['team_side']} #{p['jersey_number']} {p['short_name']}" if p else pid
 
 
