@@ -8,10 +8,11 @@ measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share call
 inputs are identical. The key does not depend on the endpoint: the same model answers the
 same request wherever it is reached, so answers cached before a change of endpoint stay valid.
 
-The endpoint (base URL and key) is read from the local file named by `api.endpoint`
-(configs/api.local.yaml, gitignored: the key never goes into the repo); it is only needed when
-a call misses the cache. Without it a miss raises NoAPIKey, so a replay from a shared cache
-either reproduces the cached run or stops.
+The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
+(configs/api.local.yaml, gitignored: keys never go into the repo), in order: the next one takes
+over when the current one runs out of quota or keeps failing. They are only needed when a call
+misses the cache. Without them a miss raises NoAPIKey, so a replay from a shared cache either
+reproduces the cached run or stops.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ class APIClient:
         # `config` is the `api` section of the YAML config.
         self.config = config
         self.cache_dir = cache_dir / config["cache"]
-        self._client = None
+        self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
+        self._current = 0                        # the endpoint in use; the next takes over when it gives out
         self._lock = threading.Lock()
 
     def generate(self, parts: Sequence[str | bytes], json_output: bool = False) -> APIResult:
@@ -68,20 +70,24 @@ class APIClient:
             return APIResult(call_id, d["text"], d["model"], d["latency"], cached=True)
 
         with self._lock:
-            # One SDK client, created once even when several threads call at the same time.
-            if self._client is None:
-                self._client = self._connect()
+            # The SDK clients, created once even when several threads call at the same time.
+            if self._clients is None:
+                self._clients = self._connect()
         content = [{"type": "text", "text": p} if isinstance(p, str) else
                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode()}}
                    for p in parts]
         extra = {"response_format": {"type": "json_object"}} if json_output else {}
-        # Transient errors (overload, quota, timeouts) are retried with backoff; the latency kept is
-        # the successful attempt's, as a cached replay has nothing else to go on.
+        # Transient errors (overload, timeouts) are retried with backoff on the same endpoint; an
+        # endpoint out of quota, or failing this request `switch_after` times in a row, hands over to
+        # the next one at once. The latency kept is the successful attempt's, as a cached replay has
+        # nothing else to go on.
+        failures = 0
         for attempt in range(self.config.get("max_attempts", 1)):
+            current = self._current
+            client = self._clients[current]
             try:
                 t0 = time.perf_counter()
-                resp = self._client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}],
-                                                            **extra)
+                resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}], **extra)
                 latency = time.perf_counter() - t0
                 message = resp.choices[0].message if resp.choices else None
                 text = (message.content if message else None) or _from_tool_calls(message)
@@ -92,11 +98,19 @@ class APIClient:
             except Exception as e:  # noqa: BLE001 — any API failure is retried the same way
                 if attempt + 1 == self.config.get("max_attempts", 1):
                     raise
-                print(f"api retry {attempt + 1}: {type(e).__name__}: {str(e)[:120]}", flush=True)
+                failures += 1
+                print(f"api retry {attempt + 1} ({client.base_url.host}): {type(e).__name__}: {str(e)[:120]}", flush=True)
+                if len(self._clients) > 1 and (_out_of_quota(e) or failures >= self.config.get("switch_after", 5)):
+                    with self._lock:
+                        if self._current == current:        # another thread may have switched already
+                            self._current = (current + 1) % len(self._clients)
+                            print(f"api: switching to {self._clients[self._current].base_url}", flush=True)
+                    failures = 0
+                    continue
                 time.sleep(min(5 * 2 ** attempt, self.config.get("max_backoff", 120)))
         d = {"text": text, "model": resp.model or model, "latency": latency,
              "usage": resp.usage.model_dump(mode="json") if resp.usage else None,
-             "endpoint": str(self._client.base_url)}
+             "endpoint": str(client.base_url)}
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-rename so an interrupted run never leaves a truncated cache entry. The temp
         # name is per process and thread: parallel runs (ablations) may make the same request.
@@ -106,19 +120,29 @@ class APIClient:
         tmp.replace(path)
         return APIResult(call_id, d["text"], d["model"], latency, cached=False)
 
-    def _connect(self):
-        """The SDK client for the endpoint in the local file `api.endpoint`."""
+    def _connect(self) -> list:
+        """One SDK client per endpoint of the local file `api.endpoint`, in its order."""
         path = REPO_ROOT / self.config["endpoint"]
-        endpoint = yaml.safe_load(path.read_text()) if path.exists() else None
-        if not endpoint or not endpoint.get("api_key"):
+        local = yaml.safe_load(path.read_text()) if path.exists() else None
+        endpoints = [e for e in (local or {}).get("endpoints") or [] if e.get("api_key")]
+        if not endpoints:
             # Replaying from a shared cache needs no key; a request the cache lacks means the run
             # has diverged from the cached one, which must stop the run, not be retried.
             raise NoAPIKey(f"a request missed the cache and there is no endpoint and key in {path}")
         from openai import OpenAI
         # Retries are ours (above); without a timeout an overloaded server can leave a request
         # hanging for good.
-        return OpenAI(base_url=endpoint["base_url"], api_key=endpoint["api_key"], max_retries=0,
-                      timeout=self.config.get("timeout", 180))
+        return [OpenAI(base_url=e["base_url"], api_key=e["api_key"], max_retries=0,
+                       timeout=self.config.get("timeout", 180)) for e in endpoints]
+
+
+def _out_of_quota(e: Exception) -> bool:
+    """An error that retrying the same endpoint will not fix: the key refused (401 / 402 / 403) or
+    its quota or balance used up (often a 429 that says so)."""
+    status = getattr(e, "status_code", None)
+    text = str(e).lower()
+    return status in (401, 402, 403) or any(w in text for w in ("quota", "insufficient", "balance", "credit",
+                                                                "余额", "额度"))
 
 
 def _from_tool_calls(message) -> str:

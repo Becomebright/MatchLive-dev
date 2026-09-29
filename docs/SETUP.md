@@ -47,11 +47,15 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
   pin: ORT 1.30 loads `libnvinfer.so.10`, so with TensorRT 11 the TensorRT EP fails to load and
   ORT silently falls back to CUDA.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
-- The LLM API is reached through an OpenAI-compatible endpoint (the `openai` SDK), named in
-  `configs/api.local.yaml`, which is gitignored so the key never enters the repo:
+- The LLM API is reached through OpenAI-compatible endpoints (the `openai` SDK), named in
+  `configs/api.local.yaml`, which is gitignored so the keys never enter the repo. They are used
+  in order; the next takes over when one runs out of quota or keeps failing (`api.switch_after`):
   ```yaml
-  base_url: https://.../v1
-  api_key: sk-...
+  endpoints:
+    - base_url: https://.../v1
+      api_key: sk-...
+    - base_url: https://.../v1        # backup
+      api_key: sk-...
   ```
   The model is `api.model` in `configs/default.yaml` (`gemini-3.8-flash`). Cached API responses
   (`cache/api/`) replay without the file; without it, a request the cache lacks stops the run

@@ -64,12 +64,14 @@ commentary:
 # LLM API (DESIGN.md §2 principle 9), called through an OpenAI-compatible endpoint; responses
 # cached under paths.cache/<cache>, keyed by model + request.
 api:
-  # Base URL and key, in a local file that is never committed (configs/*.local.yaml is gitignored):
-  #   base_url: https://.../v1
-  #   api_key: sk-...
+  # Endpoints, in a local file that is never committed (configs/*.local.yaml is gitignored); used
+  # in order, the next taking over when one runs out of quota or keeps failing:
+  #   endpoints:
+  #     - {base_url: https://.../v1, api_key: sk-...}
   endpoint: configs/api.local.yaml
   model: gemini-3.8-flash
   cache: api
+  switch_after: 5                      # failures of one request in a row before the next endpoint takes over
   max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most max_backoff)
   max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
