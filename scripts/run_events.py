@@ -88,7 +88,7 @@ def main():
                         frames[wanted[frame_idx]] = image
                 frame_idx += 1
             shown = [(s, frames[s]) for s in grid if window[0] <= s < window[1] and s in frames]
-            request = build_request(args.half, window, shown, perceived, match.metadata, ev["sample_fps"])
+            request = build_request(args.half, window, shown, perceived, match.prematch, ev["sample_fps"])
             # The player behind each track as last seen in the window — what the model was
             # told — recorded next to the candidates for scoring attribution.
             players_of = {}

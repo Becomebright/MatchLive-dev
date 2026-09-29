@@ -50,20 +50,23 @@ class Request:
 
 
 INSTRUCTIONS = """You are analysing a football (soccer) broadcast, {window}.
-Home: {home} ({home_kit} kit). Away: {away} ({away_kit} kit).
+Home: {home} ({home_kit} kit), defending the goal on the {home_side} of the main camera's picture this half.
+Away: {away} ({away_kit} kit), defending the goal on the {away_side}.
 
 Below are {n} frames sampled at {fps} per second, in order, each preceded by its number.
 Tracked players carry an ID label (P1, P2, ...) that is only valid inside this request;
 the text after these instructions says who each ID is, as far as the tracker knows.
 
 Report every event of these types that you can see in the frames:
-shot, goal, yellow_card, red_card, foul, substitution, penalty, free_kick, offside, corner.
+shot, goal, yellow_card, red_card, foul, substitution, penalty, free_kick, offside, corner,
+injury (play stopped for a player who is down injured or being treated).
 - team: "home" or "away", the side performing the action — the shooter's side for shot,
   the side the goal counts for (own goals included) for goal, the booked player's side for
   cards, the offending side for foul, the side taking a free_kick / corner / penalty, the
-  side caught offside, the side making a substitution.
+  side caught offside, the side making a substitution, the injured player's side for injury.
 - participants: {{"role", "id"}} with the P-ID. "player" is the main actor (shooter, scorer,
-  booked player, fouler, taker); a foul may add "fouled"; a substitution uses "out" and "in".
+  booked player, fouler, taker, injured player); a foul may add "fouled"; a substitution
+  uses "out" and "in".
   Leave out anyone without an ID label; never invent IDs.
 - replay: true if the event is shown in a replay rather than live. Live play is shown from
   the main wide broadcast camera. Ball-in-play action shown from any other angle (behind the
@@ -82,14 +85,33 @@ Answer with JSON only:
 
 def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple[float, np.ndarray]],
                   perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None]]],
-                  metadata: Mapping[str, Any], sample_fps: float) -> Request:
+                  prematch: Mapping[str, Any], sample_fps: float) -> Request:
     """`frames`: (second, BGR image) of the sampled frames; `perceived`: second ->
     (tracks with identity, key of the track nearest the ball, number read clearly off each
-    track) at that frame (see runtime.runner.resolve_frames)."""
-    players = {p["hash"]: p for p in metadata["players"]}
-    teams, kits = metadata["teams"], metadata["jersey_colors"]
+    track) at that frame (see runtime.runner.resolve_frames); `prematch`: Match.prematch."""
+    teams, kits, sides = prematch["teams"], prematch["jersey_colors"], prematch["sides"][half]
+    block, images, pid_of = labelled_frames(frames, perceived, prematch)
+    t0, t1 = window
+    text = INSTRUCTIONS.format(
+        window=f"half {half}, {clock(t0)}-{clock(t1)} of the half video",
+        home=teams["home"], away=teams["away"], home_kit=kits["home"][0], away_kit=kits["away"][0],
+        home_side=sides["home"], away_side=sides["away"], n=len(frames), fps=sample_fps)
+    return Request([text + "\n\n" + block, *images],
+                   {pid: (half, *key) for key, pid in pid_of.items()},
+                   [second for second, _ in frames])
 
-    # Window-local IDs, numbered by first appearance.
+
+def labelled_frames(frames: Sequence[tuple[float, np.ndarray]],
+                    perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None]]],
+                    prematch: Mapping[str, Any]) -> tuple[str, list[str | bytes], dict[tuple, str]]:
+    """Frames as a model is shown them (the event analyzer, the QA's current view): each
+    tracked player marked with a local ID label ("P3"), and a text block saying who each ID is
+    as far as identity voting knows, who is nearest the ball in each frame, and where the
+    camera cuts. Returns (text block, ["Frame k (clock)", JPEG, ...], track key -> ID)."""
+    players = {p["hash"]: p for p in prematch["players"]}
+    teams = prematch["teams"]
+
+    # Local IDs, numbered by first appearance.
     pid_of: dict[tuple, str] = {}
     last: dict[tuple, Track] = {}                 # each track as last seen (latest votes)
     seen_clear: dict[tuple, list[int]] = {}       # frames where its number was read clearly
@@ -118,16 +140,11 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
         if key in seen_clear:
             who += f"; number clearly visible in frames {_ranges(seen_clear[key])}"
         lines.append(f"{pid}: {who}")
-    t0, t1 = window
-    text = INSTRUCTIONS.format(
-        window=f"half {half}, {clock(t0)}-{clock(t1)} of the half video",
-        home=teams["home"], away=teams["away"], home_kit=kits["home"][0], away_kit=kits["away"][0],
-        n=len(frames), fps=sample_fps)
-    text += "\n\nPlayer IDs:\n" + "\n".join(lines or ["(none tracked)"])
-    text += "\nNearest to the ball (frame:ID, - = ball not found): " + " ".join(carriers)
-    text += "\nCamera cuts just before frames: " + (", ".join(cuts) or "none")
+    block = "Player IDs:\n" + "\n".join(lines or ["(none tracked)"])
+    block += "\nNearest to the ball (frame:ID, - = ball not found): " + " ".join(carriers)
+    block += "\nCamera cuts just before frames: " + (", ".join(cuts) or "none")
 
-    parts: list[str | bytes] = [text]
+    parts: list[str | bytes] = []
     for k, (second, image) in enumerate(frames, start=1):
         tracks = perceived.get(second, ((), None, ()))[0]
         image = draw_ids(image, [(pid_of[t.key], t.bbox_ltwh) for t in tracks])
@@ -135,9 +152,7 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
         ok, jpg = cv2.imencode(".jpg", cv2.resize(image, (960, 540), interpolation=cv2.INTER_AREA),
                                [cv2.IMWRITE_JPEG_QUALITY, 80])
         parts += [f"Frame {k} ({clock(second)})", jpg.tobytes()]
-    return Request(parts,
-                   {pid: (half, *key) for key, pid in pid_of.items()},
-                   [second for second, _ in frames])
+    return block, parts, pid_of
 
 
 def parse_candidates(text: str, request: Request) -> list[Candidate]:
@@ -171,7 +186,11 @@ def parse_json(text: str) -> dict:
     try:
         answer = json.loads(text)
     except json.JSONDecodeError:
-        return {}
+        # Stray text around the object (e.g. a lone closing fence): try the outermost braces.
+        try:
+            answer = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        except json.JSONDecodeError:
+            return {}
     return answer if isinstance(answer, dict) else {}
 
 

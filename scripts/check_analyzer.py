@@ -51,7 +51,7 @@ def main():
         ok, image = cap.read()
         if ok:
             frames.append((s, image))
-    request = build_request(args.half, window, frames, perceived, match.metadata, ev["sample_fps"])
+    request = build_request(args.half, window, frames, perceived, match.prematch, ev["sample_fps"])
 
     out_dir = config["paths"]["outputs"] / "check_analyzer" / f"{args.match[:10]}_h{args.half}_{int(args.start)}s"
     out_dir.mkdir(parents=True, exist_ok=True)

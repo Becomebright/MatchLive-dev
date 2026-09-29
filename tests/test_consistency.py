@@ -18,9 +18,10 @@ ROSTER = ([{"hash": f"h{i}", "team_side": "home", "starting": i <= 3} for i in r
 CONFIG = load_config()
 
 
-def setup(consistency=True):
+def setup(consistency=True, replay=True):
     config = copy.deepcopy(CONFIG)
     config["loop"]["consistency"] = consistency
+    config["loop"]["replay"] = replay
     return Feed(MatchMemory(ROSTER), ConsistencyChecker(config))
 
 
@@ -71,6 +72,16 @@ def test_replay_candidate_matches_the_goal_it_repeats():
     # Seen again 50 s later in a replay: its interval reaches back W seconds, so it matches.
     assert feed(190, "goal", "home", 150, replay=True, window=(140, 170), player=(9, "h1")) == g
     assert not cases(mem)
+
+
+def test_replay_off_takes_the_replay_for_a_second_goal():
+    # loop.replay off (DESIGN.md §7): the same replay is a live sighting 50 s after the goal,
+    # so it is not matched to it — it becomes a second goal, which only the kick-off rule catches.
+    feed = setup(replay=False); mem, checker = feed.mem, feed.checker
+    g = feed(130, "goal", "home", 100, player=(7, "h1"))
+    assert feed(190, "goal", "home", 150, replay=True, window=(140, 170), player=(9, "h1")) != g
+    [case] = cases(mem, "kickoff_after_goal")
+    assert g in case.members
 
 
 def test_two_shots_in_one_window_stay_two_events():

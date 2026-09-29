@@ -1,8 +1,12 @@
-"""Offline match runner: drives the perception modules frame by frame (DESIGN.md §6.10).
+"""Offline match runner (DESIGN.md §6.10).
 
-Phase 0 scope: one pass over a half video that writes the raw perception cache
-(matchlive.common.cache). Later phases hang the trigger, event analysis and memory off
-the same loop.
+MatchRunner makes one pass over a half video and writes the raw perception cache
+(matchlive.common.cache). run_live() then plays the whole match forward on one match clock:
+identity voting frame by frame (fed by memory, loop.state_to_perception), the event analyzer
+on every fixed window, the consistency check and the arbiter — each API answer taking effect
+at its issue time + measured latency, as it would live. replay_events() is the older loop over
+analyzer answers cached by scripts/run_events.py, kept for the subagent arbiter
+(scripts/run_arbiter.py).
 """
 
 from __future__ import annotations
@@ -137,29 +141,35 @@ def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.nd
     None, the number read clearly off each track in this frame or None). Frames without
     tracks or detections are absent.
 
-    Phase 2 votes over the whole squad (the §7 loop.state_to_perception baseline); the
-    on-pitch roster from memory comes with that switch in phase 4.
+    Votes over the whole squad without memory (the §7 loop.state_to_perception baseline);
+    run_live() does the same with the on-pitch roster and identities from memory.
     """
-    roster = roster_index(match.metadata["players"])
-    resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.metadata["jersey_colors"]))
-    min_ball = config["perception"]["ball"]["min_score"]
-    min_prob = config["perception"]["identity"]["jersey_min_prob"]
+    roster = roster_index(match.prematch["players"])
+    resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.prematch["jersey_colors"]))
     out = {}
     for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
         tracks = resolver.update(frame_idx, tracks, jersey, color, roster, confirmed={})
         if frame_idx in keep:
-            ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), min_ball)
-            ball_point = None if ball is None else (ball.bbox_ltwh[0] + ball.bbox_ltwh[2] / 2,
-                                                    ball.bbox_ltwh[1] + ball.bbox_ltwh[3])
-            carrier = nearest_to_ball(tracks, ball_point)
-            # "Clearly read" uses the same bar as a jersey vote (identity.jersey_min_prob).
-            numbers = []
-            for probs in jersey:
-                label = -1 if np.isnan(probs[0]) else int(np.argmax(probs))
-                clear = label not in (-1, UNREADABLE) and probs[label] >= min_prob
-                numbers.append(label_to_number(label) if clear else None)
-            out[frame_idx] = (tracks, None if carrier is None else carrier.key, numbers)
+            out[frame_idx] = frame_view(config, tracks, jersey, det)
     return out
+
+
+def frame_view(config: dict[str, Any], tracks: list[Track], jersey: np.ndarray,
+               det: np.ndarray) -> tuple[list[Track], tuple | None, list[str | None]]:
+    """One frame as the event analyzer is told about it: (tracks with identity, the key of the
+    track nearest the ball or None, the number read clearly off each track or None)."""
+    ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), config["perception"]["ball"]["min_score"])
+    ball_point = None if ball is None else (ball.bbox_ltwh[0] + ball.bbox_ltwh[2] / 2,
+                                            ball.bbox_ltwh[1] + ball.bbox_ltwh[3])
+    carrier = nearest_to_ball(tracks, ball_point)
+    # "Clearly read" uses the same bar as a jersey vote (identity.jersey_min_prob).
+    min_prob = config["perception"]["identity"]["jersey_min_prob"]
+    numbers = []
+    for probs in jersey:
+        label = -1 if np.isnan(probs[0]) else int(np.argmax(probs))
+        clear = label not in (-1, UNREADABLE) and probs[label] >= min_prob
+        numbers.append(label_to_number(label) if clear else None)
+    return tracks, None if carrier is None else carrier.key, numbers
 
 
 def observations(results: dict[int, list[dict]]) -> dict[str, dict]:
@@ -195,7 +205,7 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
     from matchlive.events.consistency import ConsistencyChecker
     from matchlive.runtime.evidence import EvidenceTools
 
-    mem = MatchMemory(match.metadata["players"], cascade=config["loop"]["cascade"])
+    mem = MatchMemory(match.prematch["players"], cascade=config["loop"]["cascade"])
     checker = ConsistencyChecker(config)
     tools = EvidenceTools(config, match)          # loads perception only when first asked
     if decide is None:
@@ -236,7 +246,7 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
             if not config["loop"]["arbiter"]:
                 reject_newest(mem, t, case.case_id)
                 continue
-            packet = build_packet(mem, case, t, sources, match.metadata, config["arbiter"]["context"])
+            packet = build_packet(mem, case, t, sources, match.prematch, config["arbiter"]["context"])
             decision = decide(mem, case, packet, t)
             if decision is None:
                 continue
@@ -251,3 +261,212 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
                 continue
             heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
     return mem, records
+
+
+def off_roster_obs(half: int, key: tuple, player: str) -> str:
+    """Observation id of a track reading as a player memory has off the pitch
+    (loop.state_to_perception): "read:<half>/<shot>/<track>:<player hash>"."""
+    return f"read:{half}/{key[0]}/{key[1]}:{player}"
+
+
+def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> MatchMemory:
+    """The whole match, live, from the raw perception cache (DESIGN.md §6.10 offline mode).
+
+    One match clock drives everything, half by half and frame by frame:
+      - identity voting (perception.identity) on every frame; with loop.state_to_perception it
+        votes only among the players memory has on the pitch at that moment, keeps memory's
+        confirmed identity entries, and reports a number worn by nobody on the pitch that names
+        an off-pitch player as evidence (consistency.off_roster_read);
+      - at the end of every fixed window, the event analyzer's request is built from the
+        frames and identities seen so far and sent through `client` (APIClient); its answer
+        takes effect at the window end + the measured latency;
+      - answers go through the consistency check; every event-level case goes to the arbiter
+        at once, a perception case once it has `off_roster_k` sources; the verdict takes effect
+        at the case's opening + the arbiter's summed latency, unless past the deadline.
+    The model calls are synchronous, so the wall time is the sum of their latencies; what memory
+    holds at each match time is what a live run with the same latencies would have held.
+
+    Writes to `out_dir`: ops.jsonl (the memory log — everything the QA reads), windows.jsonl
+    (each window's call and candidates), cases.json (each arbitrated case), and
+    perceived_half<h>.pkl (second -> the frame as the analyzer was told about it, at the
+    sampled seconds, for the QA's current view). Returns memory.
+    """
+    import heapq
+    import itertools
+    import json
+    import pickle
+
+    from matchlive.arbiter.agent import Arbiter, Decision, build_packet
+    from matchlive.arbiter.verdict import apply_verdict, reject_newest
+    from matchlive.common.cache import load_perception
+    from matchlive.events.analyzer import Candidate, build_request, parse_candidates
+    from matchlive.events.consistency import ConsistencyChecker
+    from matchlive.events.windows import fixed_windows
+    from matchlive.runtime.evidence import EvidenceTools
+
+    loop, ev, prematch = config["loop"], config["events"], match.prematch
+    feedback = loop["state_to_perception"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "ops.jsonl").unlink(missing_ok=True)
+    mem = MatchMemory(prematch["players"], log_path=out_dir / "ops.jsonl", cascade=loop["cascade"])
+    checker = ConsistencyChecker(config)
+    tools = EvidenceTools(config, match)
+    arbiter = Arbiter(config["arbiter"], lambda parts: client.generate(parts, json_output=True))
+    squad = roster_index(prematch["players"])
+    sources: dict[str, dict] = {}      # observation id -> the analyzer window and candidate behind it
+    records: list[dict] = []           # one per arbitrated case
+    windows_log = open(out_dir / "windows.jsonl", "w")
+    # One timeline of things taking effect later: analyzer answers arriving, verdicts landing.
+    queue: list = []
+    order = itertools.count()
+    n_seen = 0                         # cases already handled (case ids are handed out in order)
+
+    def arbitrate(case, t):
+        if not loop["arbiter"]:
+            reject_newest(mem, t, case.case_id)
+            return
+        packet = build_packet(mem, case, t, sources, prematch, config["arbiter"]["context"])
+        try:
+            decision = arbiter.decide(packet, lambda tool, args: tools.call(mem, t, tool, args))
+        except Exception as e:  # noqa: BLE001 — out of API retries: the case stays open, nothing blocks
+            decision = Decision(None, [], 0, 0.0, f"API failure: {type(e).__name__}: {str(e)[:200]}")
+        record = {"case": case.case_id, "constraint": case.constraint, "opened": t, "calls": decision.calls,
+                  "latency": decision.latency, "verdict": decision.verdict,
+                  "evidence": len(decision.evidence_ids), "void": decision.note or None}
+        records.append(record)
+        print(f"  case {case.case_id} {case.constraint} at {t[0]}H {t[1]:.0f}s: "
+              f"{'verdict' if decision.verdict else decision.note} ({decision.calls} calls, {decision.latency:.0f}s)",
+              flush=True)
+        if decision.verdict is None:
+            return
+        if decision.latency > config["arbiter"]["deadline"]:
+            record["void"] = "past the deadline"
+            return
+        heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
+
+    def settle(t):
+        # Event-level conflicts go to the arbiter at once (k = 1, DESIGN.md §6.4); perception
+        # ones (off_roster_read) only when off_roster_read() says they have enough sources.
+        nonlocal n_seen
+        new, n_seen = list(mem.cases.values())[n_seen:], len(mem.cases)
+        for case in new:
+            if case.constraint != "off_roster_read":
+                arbitrate(case, t)
+
+    def advance(t):
+        """Apply everything that has taken effect by match time t, in time order."""
+        while queue and queue[0][0] <= t:
+            when, _, kind, payload = heapq.heappop(queue)
+            if kind == "verdict":
+                record, decision, t_bound = payload
+                if mem.cases[record["case"]].status == "open":
+                    record["void"] = apply_verdict(
+                        mem, when, record["case"], decision.verdict, decision.evidence_ids, t_bound,
+                        ev["live_margin"], lambda key: len(tools.track_frames(key, t_bound)) > 0,
+                        lambda a, b: tools.cooccur(a, b, t_bound))
+                continue
+            checker.tick(mem, when)
+            half, r = payload
+            for i, c in enumerate(r["candidates"]):
+                checker.propose(mem, when, half, tuple(r["window"]), Candidate.from_dict(c),
+                                f"obs:{r['call_id']}#{i}", c["players"])
+            settle(when)
+
+    for half in (1, 2):
+        arrays, meta = load_perception(cache_path(config, match.video_path(half), match.name, half, 0, None))
+        fps = meta["fps"]
+        duration = meta["n_frames"] / fps
+        windows = fixed_windows(duration, ev["window_seconds"], ev["window_overlap"])
+        # Sample times on one grid for the whole half, so overlapping windows share frames.
+        step = 1 / ev["sample_fps"]
+        grid = [k * step for k in range(int(duration / step) + 1)]
+        wanted = {int(round(s * fps)): s for s in grid}
+        resolver = IdentityResolver(config["perception"]["identity"], kit_lab(prematch["jersey_colors"]))
+        cap = cv2.VideoCapture(str(match.video_path(half)))
+        video = {"pos": 0}
+        images: dict[float, np.ndarray] = {}      # sampled frames a current or later window still needs
+        perceived: dict[float, tuple] = {}        # sampled second -> frame_view()
+        reads_seen: set[str] = set()
+        roster, confirmed, version = squad, {}, None
+
+        def fire(window):
+            """Window over: build the analyzer's request from what has been seen, call the model,
+            and queue the answer for when it arrives."""
+            t = (half, window[1])
+            advance(t)
+            checker.tick(mem, t)
+            settle(t)
+            while video["pos"] <= int(round(window[1] * fps)):
+                if not cap.grab():
+                    break
+                if video["pos"] in wanted:
+                    ok, image = cap.retrieve()
+                    if ok:
+                        images[wanted[video["pos"]]] = image
+                video["pos"] += 1
+            shown = [(s, images[s]) for s in grid if window[0] <= s < window[1] and s in images]
+            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"])
+            # The player behind each track as last seen in the window — what the model was told.
+            players_of = {(half, *tr.key): tr.player_id
+                          for s, _ in shown for tr in perceived.get(s, ((), None, ()))[0] if tr.player_id}
+            try:
+                result = client.generate(request.parts, json_output=True)
+            except Exception as e:  # noqa: BLE001 — out of retries: live, this window is simply lost
+                windows_log.write(json.dumps({"half": half, "window": window, "error": f"{type(e).__name__}: {e}"}) + "\n")
+                print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {e}", flush=True)
+                return
+            cands = [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
+                     for c in parse_candidates(result.text, request)]
+            r = {"half": half, "window": window, "call_id": result.call_id, "model": result.model,
+                 "latency": result.latency, "cached": result.cached, "candidates": cands}
+            windows_log.write(json.dumps(r) + "\n")
+            windows_log.flush()
+            print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s {len(cands)} candidates, {result.latency:.1f}s"
+                  f"{' cached' if result.cached else ''}", flush=True)
+            for i, c in enumerate(cands):
+                sources[f"obs:{result.call_id}#{i}"] = {"window": window, "candidate": c}
+            heapq.heappush(queue, ((half, window[1] + result.latency), next(order), "answer", (half, r)))
+            # The next window starts `window_overlap` s before this one ends.
+            for s in [s for s in images if s < window[1] - ev["window_overlap"]]:
+                del images[s]
+
+        w = 0
+        for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
+            second = frame_idx / fps
+            while w < len(windows) and windows[w][1] <= second:
+                fire(windows[w])
+                w += 1
+            advance((half, second))
+            if feedback and len(mem.ops) != version:
+                # Memory changed: the players on the pitch now, and the confirmed identities of
+                # this half's tracks (DESIGN.md §6.1 identity (a), (c)).
+                version = len(mem.ops)
+                view = mem.at((half, second))
+                on = set(view.on_field["home"] + view.on_field["away"])
+                roster = roster_index([p for p in prematch["players"] if p["hash"] in on])
+                confirmed = {key[1:]: pid for key, pid in mem.track_players().items() if key[0] == half}
+            tracks = resolver.update(frame_idx, tracks, jersey, color, roster, confirmed)
+            if feedback and loop["consistency"]:
+                for key, player in resolver.off_roster_reads({tr.key: tr.team for tr in tracks}, roster, squad):
+                    obs = off_roster_obs(half, key, player)
+                    if obs in reads_seen:
+                        continue
+                    reads_seen.add(obs)
+                    case_id = checker.off_roster_read(mem, (half, second), obs, player)
+                    settle((half, second))
+                    if case_id:
+                        arbitrate(mem.cases[case_id], (half, second))
+            if frame_idx in wanted:
+                perceived[wanted[frame_idx]] = frame_view(config, tracks, jersey, det)
+        while w < len(windows):
+            fire(windows[w])
+            w += 1
+        cap.release()
+        with open(out_dir / f"perceived_half{half}.pkl", "wb") as f:
+            pickle.dump(perceived, f)
+
+    # After the final whistle: the last answers and verdicts land.
+    advance((3, 0.0))
+    windows_log.close()
+    (out_dir / "cases.json").write_text(json.dumps(records, indent=1, default=str))
+    return mem
