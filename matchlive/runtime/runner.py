@@ -298,6 +298,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
 
     from matchlive.arbiter.agent import Arbiter, Decision, build_packet
     from matchlive.arbiter.verdict import apply_verdict, reject_newest
+    from matchlive.common.api import NoAPIKey
     from matchlive.common.cache import load_perception
     from matchlive.events.analyzer import Candidate, build_request, parse_candidates
     from matchlive.events.consistency import ConsistencyChecker
@@ -328,6 +329,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
         packet = build_packet(mem, case, t, sources, prematch, config["arbiter"]["context"])
         try:
             decision = arbiter.decide(packet, lambda tool, args: tools.call(mem, t, tool, args))
+        except NoAPIKey:
+            raise
         except Exception as e:  # noqa: BLE001 — out of API retries: the case stays open, nothing blocks
             decision = Decision(None, [], 0, 0.0, f"API failure: {type(e).__name__}: {str(e)[:200]}")
         record = {"case": case.case_id, "constraint": case.constraint, "opened": t, "calls": decision.calls,
@@ -411,6 +414,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                           for s, _ in shown for tr in perceived.get(s, ((), None, ()))[0] if tr.player_id}
             try:
                 result = client.generate(request.parts, json_output=True)
+            except NoAPIKey:
+                raise
             except Exception as e:  # noqa: BLE001 — out of retries: live, this window is simply lost
                 windows_log.write(json.dumps({"half": half, "window": window, "error": f"{type(e).__name__}: {e}"}) + "\n")
                 print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {e}", flush=True)

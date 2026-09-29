@@ -28,11 +28,13 @@ class Match:
     def video_path(self, half: int) -> Path:
         return self.dir / self.metadata["videos"][str(half)]
 
-    def benchmark_timestamp(self, half: int, second: float) -> float:
-        # (half, second) is the primary time key; the benchmark's whole-video timestamp is
-        # derived through the per-match offset table (DESIGN.md §4). Half-video seconds were
-        # checked against the on-screen clock and are used as match time without correction.
-        return self.benchmark_offsets[half] + second
+    def match_time(self, timestamp: float) -> tuple[int, float]:
+        """A streaming-QA benchmark timestamp (seconds of the whole video) -> (half, second).
+        (half, second) is the primary time key; the benchmark's timestamp relates to it through
+        the per-match offset table (DESIGN.md §4): timestamp = offset[half] + second. Half-video
+        seconds were checked against the on-screen clock and are used as match time as is."""
+        start2 = self.benchmark_offsets[2]
+        return (2, float(timestamp - start2)) if timestamp >= start2 else (1, float(timestamp))
 
 
 def prematch(metadata: Mapping[str, Any]) -> dict[str, Any]:

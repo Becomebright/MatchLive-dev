@@ -14,12 +14,10 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from collections import Counter
 
 from matchlive.common.api import APIClient
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
-from matchlive.memory.types import Event
 from matchlive.runtime.runner import run_live
 
 
@@ -37,17 +35,9 @@ def main():
     (out_dir / "run.json").write_text(json.dumps({"loop": config["loop"], "model": config["api"]["model"],
                                                   "wall_s": time.time() - t0}, indent=1))
 
-    events = {eid: e for eid, e in mem.entries.items() if isinstance(e, Event)}
     print(out_dir)
-    print(f"wall {time.time() - t0:.0f} s; {len(events)} event entries: "
-          + ", ".join(f"{k} {v}" for k, v in Counter(mem.status(e) for e in events).items()))
-    print("cases: " + ", ".join(f"{k} {v}" for k, v in Counter(c.constraint for c in mem.cases.values()).items())
-          + f"; open {sum(c.status == 'open' for c in mem.cases.values())}")
-    end = mem.at((3, 0.0))
-    print(f"score in memory at the final whistle: {end.score}")
-    names = {p["hash"]: p["short_name"] for p in match.prematch["players"]}
-    for side in ("home", "away"):
-        print(f"{side} on the pitch at the end: {sorted(names[p] for p in end.on_field[side])}")
+    print(f"wall {time.time() - t0:.0f} s; final score in memory {mem.at((3, 0.0)).score}")
+    print(f"summary: python scripts/eval_live.py --match \"{args.match}\" --run {args.name}")
 
 
 if __name__ == "__main__":

@@ -38,10 +38,16 @@ ROLE_NAME = {code: role for role, code in ROLE_CODE.items()}
 
 
 def _file_id(path: Path) -> list:
-    # Name, size and mtime identify a video or model file without hashing hundreds of MB;
-    # re-exporting a model changes its mtime and so invalidates the cache.
-    stat = path.stat()
-    return [path.name, stat.st_size, stat.st_mtime_ns]
+    # Name, size and a hash of the first and last MiB identify a video or model file without
+    # hashing hundreds of MB. Unlike a modification time they survive a download to another
+    # machine, so a shared cache stays valid there; re-exporting a model changes its bytes.
+    size = path.stat().st_size
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        h.update(f.read(1 << 20))
+        f.seek(max(0, size - (1 << 20)))
+        h.update(f.read(1 << 20))
+    return [path.name, size, h.hexdigest()[:16]]
 
 
 def perception_key(config: dict[str, Any], sources: list[Path]) -> str:

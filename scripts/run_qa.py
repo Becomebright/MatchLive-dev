@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from matchlive.app.qa import QAAgent, question_text
-from matchlive.common.api import APIClient
+from matchlive.common.api import APIClient, NoAPIKey
 from matchlive.common.config import REPO_ROOT, load_config
 from matchlive.common.match import Match
 from matchlive.events.analyzer import clock
@@ -64,21 +64,15 @@ def main():
     client = APIClient(config["api"], config["paths"]["cache"])
     agent = QAAgent(config["qa"], lambda parts: client.generate(parts, json_output=True))
 
-    offsets = match.benchmark_offsets
-
-    def asked_at(q):
-        ts = q["timestamp"]
-        return (2, float(ts - offsets[2])) if ts >= offsets[2] else (1, float(ts))
-
     rows = [(i, q) for i, q in enumerate(map(json.loads, open(REPO_ROOT / args.benchmark)))
-            if q["match_key"] == match.metadata["match_key"] and args.half in (None, asked_at(q)[0])][: args.limit]
+            if q["match_key"] == match.metadata["match_key"] and args.half in (None, match.match_time(q["timestamp"])[0])][: args.limit]
     teams, kits = match.prematch["teams"], match.prematch["jersey_colors"]
     match_text = (f"The match: {teams['home']} (home, {kits['home'][0]} kit) vs {teams['away']} "
                   f"(away, {kits['away'][0]} kit).")
 
     def ask(item):
         i, q = item
-        now = asked_at(q)
+        now = match.match_time(q["timestamp"])
         text = question_text(q["question"], q["options"],
                              f"half {now[0]}, {clock(now[1])} ({minute_phrase(*now)})", match_text)
         letters = [o.split(".")[0] for o in q["options"]]
@@ -90,6 +84,8 @@ def main():
             else:   # blind: nothing about the match — what the question and options alone give away
                 a = agent.answer_from_log(text, letters, "(nothing has been recorded)")
             out = {"choice": a.choice, "calls": a.calls, "latency": a.latency, "tools": a.tools}
+        except NoAPIKey:
+            raise
         except Exception as e:  # noqa: BLE001 — out of API retries: the question goes unanswered
             out = {"choice": None, "error": f"{type(e).__name__}: {e}"}
         return {"line": i, "category": q["category"], "subcategory": q["subcategory"], "question": q["question"],
@@ -103,7 +99,8 @@ def main():
             if n % 50 == 0:
                 print(f"{n}/{len(rows)} answered, {time.time() - t0:.0f} s", flush=True)
 
-    name = mode if args.half is None else f"{mode}_half{args.half}"
+    # A partial run (one half, the first N questions) never overwrites the full result file.
+    name = mode + (f"_half{args.half}" if args.half else "") + (f"_first{args.limit}" if args.limit else "")
     out_path = config["paths"]["outputs"] / "qa" / args.match / args.run / f"{name}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
