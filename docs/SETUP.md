@@ -3,6 +3,23 @@
 How to set up MatchLive on a new machine: code, environment, model weights and data. Paths are
 relative to the repo root; see `CLAUDE.md` for the repo layout and day-to-day commands.
 
+## 0. Prerequisites
+
+- **Access.** The code repo (`github.com/Becomebright/MatchLive`) and the assets repo
+  (`Becomebright/MatchLive-assets` on Hugging Face) are both private: ask the owner to add your
+  GitHub account and your Hugging Face account, then create a Hugging Face token with read access
+  (Settings → Access Tokens) for `hf auth login` (§3).
+- **Platform.** Linux x86_64 with conda. The environment below pins CUDA 13 builds (torch `cu130`,
+  TensorRT), which do not install on macOS or Windows.
+  - Replaying the recorded streaming-QA runs from the shared caches (README) loads no model and
+    needs no GPU.
+  - Running perception (`scripts/run_perception.py`, SETUP §6) needs an NVIDIA GPU whose driver
+    supports CUDA 13.
+- **Disk.** About 7 GB for all assets (videos 5.3 GB, models 0.7 GB, caches 0.85 GB), plus
+  ~30 MB of outputs per replayed match. The full download took about 9 minutes on a cloud VM.
+- **API key.** Only for new model calls (a run from scratch, a changed setting): a Gemini API key
+  in `GOOGLE_API_KEY` (§2). Replays need none.
+
 ## 1. Code
 
 ```bash
