@@ -95,9 +95,23 @@ elsewhere:
 The match videos come from SoccerNet (under its NDA) and DINOv3 weights are under Meta's license,
 so the repo stays private.
 
-## 4. SoccerNet Game State Reconstruction (public; evaluation only)
+## 4. SoccerNet labels and Game State Reconstruction (evaluation only)
 
-Only the `scripts/eval_*_gsr.py` scripts need it. The test split is the public
+**Event labels of our matches.** `scripts/ground_truth.py` (and the scripts built on it:
+`eval_memory.py`, `inject_errors.py`, `eval_commentary.py`) reads each match's SoccerNet labels
+from its folder: `Labels-v2.json` (action spotting: every goal, card, substitution, shot, corner,
+foul, offside, free kick, with team and time) and `Labels-caption.json` (commentary naming the
+players). They come from the `SoccerNet/SN-Labels` dataset repo on Hugging Face (accept its terms
+on the website first), laid out as league/season/game, so they drop straight into place:
+```bash
+hf download SoccerNet/SN-Labels --repo-type dataset --local-dir dataset/organized_data \
+    --include "england_epl/2015-2016/2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United/Labels-*.json" \
+    --include "england_epl/2016-2017/2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool/Labels-*.json" \
+    --include "england_epl/2015-2016/2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-*.json"
+```
+The live system never reads them (`DESIGN.md` §6.8).
+
+**SoccerNet-GSR.** Only the `scripts/eval_*_gsr.py` scripts need it. The test split is the public
 `SoccerNet/SN-GSR-2024` dataset repo:
 ```bash
 hf download SoccerNet/SN-GSR-2024 test.zip --repo-type dataset --local-dir dataset/SoccerNetGS/gamestate-2024
