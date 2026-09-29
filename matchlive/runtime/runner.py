@@ -328,27 +328,35 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     order = itertools.count()
     n_seen = 0                         # cases already handled (case ids are handed out in order)
 
-    def arbitrate(case, t):
+    def arbitrate(case, t, opened=None, void=None):
+        """Send `case` to the arbiter at match time t. `void` is why its previous verdict was void:
+        the arbiter is told and rules once more (DESIGN.md §6.6), within the deadline counted from
+        the case's opening (`opened`)."""
         if not loop["arbiter"]:
             reject_newest(mem, t, case.case_id)
             return
+        opened = opened or t
         packet = build_packet(mem, case, t, sources, prematch, config["arbiter"]["context"])
+        if void:
+            packet += (f"\n\nYour previous verdict on this case was void: {void}. Rule again; every write must cite "
+                       "evidence ids returned by the tools in this investigation.")
         try:
             decision = arbiter.decide(packet, lambda tool, args: tools.call(mem, t, tool, args))
         except NoAPIKey:
             raise
         except Exception as e:  # noqa: BLE001 — out of API retries: the case stays open, nothing blocks
             decision = Decision(None, [], 0, 0.0, f"API failure: {type(e).__name__}: {str(e)[:200]}")
-        record = {"case": case.case_id, "constraint": case.constraint, "opened": t, "calls": decision.calls,
-                  "latency": decision.latency, "verdict": decision.verdict,
+        record = {"case": case.case_id, "constraint": case.constraint, "opened": opened, "calls": decision.calls,
+                  "latency": decision.latency, "verdict": decision.verdict, "retry": bool(void),
                   "evidence": len(decision.evidence_ids), "void": decision.note or None}
         records.append(record)
-        print(f"  case {case.case_id} {case.constraint} at {t[0]}H {t[1]:.0f}s: "
+        print(f"  case {case.case_id} {case.constraint} at {t[0]}H {t[1]:.0f}s{' (again)' if void else ''}: "
               f"{'verdict' if decision.verdict else decision.note} ({decision.calls} calls, {decision.latency:.0f}s)",
               flush=True)
         if decision.verdict is None:
             return
-        if decision.latency > config["arbiter"]["deadline"]:
+        elapsed = t[1] - opened[1] + decision.latency if t[0] == opened[0] else float("inf")
+        if elapsed > config["arbiter"]["deadline"]:
             record["void"] = "past the deadline"
             return
         heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
@@ -373,6 +381,10 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                         mem, when, record["case"], decision.verdict, decision.evidence_ids, t_bound,
                         ev["live_margin"], lambda key: len(tools.track_frames(key, t_bound)) > 0,
                         lambda a, b: tools.cooccur(a, b, t_bound))
+                    if record["void"] and not record["retry"]:
+                        # A void verdict leaves the case open and its members pending for good;
+                        # the arbiter gets one more try, told why (DESIGN.md §6.6).
+                        arbitrate(mem.cases[record["case"]], when, record["opened"], record["void"])
                 continue
             checker.tick(mem, when)
             half, r = payload
