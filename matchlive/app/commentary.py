@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from matchlive.events.analyzer import clock, parse_json
+from matchlive.events.analyzer import parse_json
 from matchlive.memory.types import Time
 from matchlive.memory.view import EventRecord, View
 
@@ -176,10 +176,8 @@ class CommentaryPolicy:
 
     def _background(self, view: View) -> Item:
         half, teams, kits = view.time[0], self.prematch["teams"], self.prematch["jersey_colors"]
-        sides = self.prematch["sides"][half]
         facts = [f"{'Kick-off' if half == 1 else 'The second half is under way'}: {teams['home']} ({kits['home'][0]}, home) "
-                 f"against {teams['away']} ({kits['away'][0]}, away).",
-                 f"{teams['home']} defend the goal on the {sides['home']} of the picture this half."]
+                 f"against {teams['away']} ({kits['away'][0]}, away)."]
         if half == 1:
             for side in ("home", "away"):
                 starters = [p for p in self.prematch["players"] if p["team_side"] == side and p["starting"]]
@@ -260,7 +258,14 @@ class CommentaryPolicy:
 
     @staticmethod
     def _clock(half: int, second: float) -> str:
-        return f"{'first' if half == 1 else 'second'} half, {clock(second)[:5]}"
+        """The minute of play as a commentator says it: "the 16th minute of the second half",
+        "first-half stoppage time"."""
+        minute = int(second // 60) + 1
+        name = "first" if half == 1 else "second"
+        if minute > 45:
+            return f"{name}-half stoppage time"
+        nth = f"{minute}{'th' if 10 <= minute % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(minute % 10, 'th')}"
+        return f"the {nth} minute of the {name} half"
 
 
 PROMPT = """You are the live TV commentator of a football match. Say ONE spoken line of at most {max_words} words in

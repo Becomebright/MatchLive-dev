@@ -12,15 +12,20 @@ the matches (both benchmark matches by default):
   2. accuracy against knowledge time (§10): the share of true events memory counts / holds
      Δ s after they happened;
   3. revisions — status changes after an entry was written: false entries (matching no true
-     event) that memory once counted and later retracted, with the correction latency; true
-     entries retracted (wrong corrections; §10's wrong-correction rate is their share of all
-     retractions); entries overturned after being counted, and how many of those were right;
+     event) that memory once counted and no longer counts at the end (corrections that reached
+     the inferences), with the correction latency; true entries once counted and no longer
+     (wrong corrections; §10's wrong-correction rate is their share of both); entries retracted
+     after being written;
   4. derived state (what the rule inferences make of memory): the score, the lineups and the
      per-team counts memory gives for time t as known at t + L, against the truth at t;
   5. identity — the players memory names on goals, cards and substitutions; and, per sampled
      frame, how many tracks carry an identity (coverage) and how many of those name a player
      who is not on the pitch at that moment (a certain error: the open- vs closed-loop check of
-     phase 4, which has no per-track ground truth on these matches).
+     phase 4, which has no per-track ground truth on these matches);
+  6. what made entries sufficient — the second justification of each entry that has one: a
+     sighting from the overlap of two adjacent windows (the same frames seen twice), from
+     another window, from a replay, the foul / free-kick pairing, or a verdict — and how many of
+     the entries each one confirmed are true.
 
 An entry matches a true event of its type (a shot entry may also match a goal), half and team
 (an entry without a team fits either) whose time lies within the entry's interval ± TOL s.
@@ -63,7 +68,8 @@ def evaluate(config: dict[str, Any], match: Match, run_dir: Path) -> dict[str, A
     ops = [Op(d["op_id"], tuple(d["t_known"]), d["kind"], d["payload"]) for d in map(json.loads, open(run_dir / "ops.jsonl"))]
     roster, cascade = match.prematch["players"], config["loop"]["cascade"]
     windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
-    replay_obs = {f"obs:{w['call_id']}#{i}" for w in windows for i, c in enumerate(w.get("candidates", [])) if c["replay"]}
+    sources = {f"obs:{w['call_id']}#{i}": (w["window"], c) for w in windows for i, c in enumerate(w.get("candidates", []))}
+    replay_obs = {obs for obs, (_, c) in sources.items() if c["replay"]}
     half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
 
     # Replay the log op by op: every entry's status after every op, and what changed it.
@@ -209,6 +215,31 @@ def evaluate(config: dict[str, Any], match: Match, run_dir: Path) -> dict[str, A
                     frames["off_pitch"] += tr.player_id not in on
                     frames["entry"] += tr.identity_source == "entry"
     out["frames"] = dict(frames)
+
+    # 6. The second justification that made each entry sufficient, and whether the entry is true.
+    confirmers = Counter()
+    for eid, e in events.items():
+        js = [j for _, j in mem.justifications[eid]]
+        second = next((j for j in js[1:] if j.sufficient), None)
+        if second is None:
+            continue
+        first = sources.get(js[0].obs_id)
+        this = sources.get(second.obs_id)
+        if second.kind == "verdict":
+            how = "verdict"
+        elif first is None or this is None:
+            how = "other"
+        elif this[1]["type"] != e.type:
+            how = "pairing"
+        elif this[1]["replay"] or first[1]["replay"]:
+            how = "replay"
+        else:
+            # Both sightings inside the stretch two adjacent windows share: the same frames.
+            (a0, a1), (b0, b1) = first[0], this[0]
+            lo, hi = max(a0, b0), min(a1, b1)
+            how = "overlap" if lo < hi and lo <= first[1]["second"] <= hi and lo <= this[1]["second"] <= hi else "other window"
+        confirmers[f"{how}|{'true' if eid in true_of else 'false'}"] += 1
+    out["confirmers"] = dict(confirmers)
     return out
 
 
@@ -349,6 +380,15 @@ def main():
         print(f"{run:24s} events right {w.get('right', 0)}/{n}, wrong {w.get('wrong', 0)}, unnamed {w.get('unnamed', 0)};"
               f"  frames identified {pct(f.get('identified', 0), f.get('tracks', 0))}%, off the pitch "
               f"{pct(f.get('off_pitch', 0), f.get('identified', 0))}% of identified ({f.get('off_pitch', 0)})")
+
+    print("\n6. The second justification that made entries sufficient: entries confirmed that way (share true)")
+    kinds = ("overlap", "other window", "replay", "pairing", "verdict", "other")
+    print(f"{'run':24s} " + " ".join(f"{k:>16s}" for k in kinds))
+    for run, r in rows.items():
+        c = r.get("confirmers", {})
+        cells = [f"{c.get(f'{k}|true', 0) + c.get(f'{k}|false', 0)} ({pct(c.get(f'{k}|true', 0), c.get(f'{k}|true', 0) + c.get(f'{k}|false', 0)).strip()})"
+                 for k in kinds]
+        print(f"{run:24s} " + " ".join(f"{x:>16s}" for x in cells))
 
 
 if __name__ == "__main__":

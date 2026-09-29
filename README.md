@@ -68,4 +68,28 @@ The other match is `"2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United"`. Expec
 
 Settings live in `configs/default.yaml`: the model (`api.model`), the loop switches of
 `DESIGN.md` §7 (`loop.*`, e.g. an ablation turns one off and runs under its own `--name`), and the
-QA budget (`qa.*`).
+QA budget (`qa.*`). `run_live.py --set loop.arbiter=false` changes a setting for one run and records
+it in the run's `run.json`, so the QA and evaluation scripts read the run the same way;
+`scripts/run_ablations.sh` plays the five single-switch ablations on both matches.
+
+## Live commentary
+
+`scripts/run_commentary.py --match "$M" [--run full] [--clip HALF START END]` puts a commentator
+on a step-1 run (`DESIGN.md` §6.9): every 2 s of match time it looks at memory as known then and
+says the most useful thing — a correction of something already said, a confirmation, the news,
+a recap — worded by status (a confirmed event names its player, a pending one only its team,
+hedged). Lines, subtitles for each half video and an optional clip with the subtitles burned in go
+to `outputs/commentary/<match>/<run>/`.
+
+## Evaluation against the SoccerNet labels
+
+With the labels of `docs/SETUP.md` §4 in the match folders:
+
+| Script | What it measures |
+|---|---|
+| `scripts/eval_memory.py --runs full no_arbiter ...` | memory over knowledge time: events counted and held, corrections, score / lineups / counts, identities |
+| `scripts/inject_errors.py` | error injection: a substitution never reported, a card given to the wrong player — does memory recover, and how soon |
+| `scripts/run_gate.py` then `eval_memory.py` | the confidence-gating baseline on the same analyzer answers |
+| `scripts/eval_commentary.py` | commentary claims (fact / hedged / names / corrections) next to a status-blind commentator |
+
+Numbers: `docs/results.md`.
