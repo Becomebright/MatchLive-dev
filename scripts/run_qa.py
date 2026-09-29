@@ -26,7 +26,7 @@ from pathlib import Path
 
 from matchlive.app.qa import QAAgent, question_text
 from matchlive.common.api import APIClient, NoAPIKey
-from matchlive.common.config import REPO_ROOT, load_config
+from matchlive.common.config import REPO_ROOT, load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.events.analyzer import clock
 from matchlive.memory.store import MatchMemory
@@ -47,10 +47,11 @@ def main():
                          "run is still playing the second (memory as known by a first-half question is complete)")
     args = ap.parse_args()
 
-    config = load_config()
+    run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
+    # The run's own settings (e.g. loop.cascade off decides how memory is read).
+    config = load_config(overrides=run_overrides(run_dir))
     mode = args.mode or config["qa"]["mode"]
     match = Match(config, args.match)
-    run_dir = config["paths"]["outputs"] / "live" / args.match / args.run
     # Read from a copy of the complete lines: the live run may still be appending to the log.
     lines = open(run_dir / "ops.jsonl").read().split("\n")[:-1]
     snapshot = Path(tempfile.mkdtemp()) / "ops.jsonl"

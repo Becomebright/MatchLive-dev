@@ -99,8 +99,9 @@ class APIClient:
         d = {"text": text, "model": resp.model_version or model, "latency": latency,
              "usage": resp.usage_metadata.model_dump(mode="json") if resp.usage_metadata else None}
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename so an interrupted run never leaves a truncated cache entry.
-        tmp = path.with_suffix(".tmp")
+        # Write-then-rename so an interrupted run never leaves a truncated cache entry. The temp
+        # name is per process and thread: parallel runs (ablations) may make the same request.
+        tmp = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
         with open(tmp, "w") as f:
             json.dump(d, f)
         tmp.replace(path)
