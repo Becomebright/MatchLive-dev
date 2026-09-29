@@ -82,11 +82,13 @@ def test_retracted_fact_is_corrected_with_the_verdict():
     # The arbiter finds the second goal was the replay of the first.
     case = mem.open_case(T(160), [first, second], "kickoff_after_goal")
     mem.reject_observation(T(200), "live#2")
-    mem.close_case(T(200), case, {"summary": "The second goal is a replay of the first.",
+    mem.close_case(T(200), case, {"summary": "E6 at 02:10.5 (track 1/4/7) is a replay of the first goal, E5.",
                                   "actions": [{"op": "reject", "observation": "live#2"}]})
     item = p.decide(mem.at(T(200)))
     assert (item.kind, item.entry, item.status) == ("correction", second, "retracted")
-    assert any("replay of the first" in f for f in item.facts)
+    reason = next(f for f in item.facts if f.startswith("What turned out"))
+    assert "replay of the first goal" in reason
+    assert not any(code in reason for code in ("E6", "E5", "02:10", "track"))   # no system codes on air
     assert mem.at(T(200)).score == {"home": 1, "away": 0}
     # Once corrected, it is not corrected again.
     p.said(item, "Correction: only one goal.", T(200))
@@ -105,7 +107,7 @@ def test_player_named_on_air_then_changed_is_corrected():
     item = p.decide(mem.at(T(300)))
     assert (item.kind, item.entry) == ("correction", eid)
     assert item.named == {"player": "h2"}
-    assert any("actually #2 Home Player2" in f for f in item.facts)
+    assert any("actually Player2" in f for f in item.facts)
 
 
 def test_pending_goal_is_aired_again_once_confirmed():

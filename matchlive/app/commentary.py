@@ -12,7 +12,8 @@ it is asked (the runtime asks every `tick` s while no line is being spoken) it p
   3. news          the most important event memory has learnt of that has not been aired and
                    happened within the last `recent` s — except a minor one that only echoes an
                    event aired within `echo` s (the same kind by the same side, or the other half
-                   of one incident: a foul and its free kick, a foul and its card);
+                   of one incident: a goal and the shot it came from, a foul and its free kick or
+                   card);
   4. background    the first line of each half: the teams, the score, pre-match facts;
   5. recap         after `recap_after` s without a line: the score and how the match is going;
   6. silence.
@@ -28,6 +29,7 @@ the policy a memory view each time (DESIGN.md §8).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -46,8 +48,9 @@ WITH_TEAM = {"goal": "a goal for {team}", "shot": "a shot by {team}", "yellow_ca
              "injury": "play stopped for an injured {team} player"}
 # The roles a line may name: the main actors only (a fouled player is often the fouler misread).
 ROLE_WORDS = {"player": "player", "in": "coming on", "out": "going off"}
-# Two events that are one incident on the pitch: aired once, the other is an echo.
-INCIDENTS = {frozenset(p) for p in (("foul", "free_kick"), ("offside", "free_kick"), ("foul", "penalty"),
+# Two events that are one incident on the pitch (the shot a goal came from; a foul and its free kick
+# or card): aired once, the other is an echo.
+INCIDENTS = {frozenset(p) for p in (("goal", "shot"), ("foul", "free_kick"), ("offside", "free_kick"), ("foul", "penalty"),
                                     ("foul", "yellow_card"), ("foul", "red_card"))}
 
 
@@ -171,68 +174,75 @@ class CommentaryPolicy:
                     before: Aired | None = None) -> Item:
         e = r.event
         half, second, replay = self._when(view, r)
-        # News is about the play on screen now: no minute, and the score only with a goal.
-        facts = [f"Event: {self._phrase(e)}" + (" (seen in a replay)" if replay else "") + "."]
+        # News is the play on screen now: no minute, and the score only with a goal.
+        facts = [f"What: {self._phrase(e)}" + (" — being shown again in a replay" if replay else "") + "."]
         for role, pid in named.items():
             facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid, view, e.type)}")
         if r.status == "confirmed":
             if e.type == "goal":                  # the score counts confirmed goals only
                 facts.append(self._score(view))
-            facts.append(f"Status: confirmed ({self._support(view, r.entry_id)}).")
-            rule = "Say it as fact" + (", naming the player(s) given." if named else "; no player is identified, so name none.")
+            facts.append(f"Certain: {self._support(view, r.entry_id)}.")
+            rule = "Call it as it happens" + (", naming the player(s) given." if named
+                                              else "; you don't know who it was, so name nobody.")
         elif e.type in self.cfg["confirm"]:
-            facts.append("Status: not confirmed yet (seen once so far, or disputed).")
-            rule = "It is not confirmed: hedge it (e.g. \"looks like\") and name no player, only the team."
+            facts.append("Not certain yet.")
+            rule = "You are not sure yet: hedge it (\"looks like...\", \"is that...?\") and name nobody, only the team."
         else:
             # A pending minor event is simply said without a player (DESIGN.md §6.9: the team only).
-            rule = "Name no player, only the team; do not talk about confirmation."
+            rule = "Name nobody, only the team."
         if kind == "confirmation":
-            facts.append(f"You said earlier: \"{before.text}\"")
-            rule = ("Earlier you mentioned this tentatively or without the player; now it is confirmed: say so"
+            facts.append(f"What you said before: \"{before.text}\"")
+            rule = ("Now it is certain: say so the way a commentator would"
                     + (", naming the player(s) given." if named else "."))
         return Item(kind, facts, rule, r.entry_id, r.status, named, (half, second))
 
     def _correction(self, view: View, r: EventRecord, before: Aired, named: dict[str, str], what: str) -> Item:
         e = r.event
         half, second, _ = self._when(view, r)
-        facts = [f"You said earlier: \"{before.text}\"", f"About: {self._phrase(e)}, {self._clock(half, second)}."]
-        reason = self._reason(view, r.entry_id)
+        facts = [f"What you said before: \"{before.text}\"", f"About: {self._phrase(e)}, in {self._clock(half, second)}."]
+        reason = _plain(self._reason(view, r.entry_id))
         if what == "retracted":
-            facts.append(f"It turned out not to be right: {reason}")
-            rule = "Correct yourself briefly and plainly (e.g. \"Correction: ...\"), giving the reason."
+            facts.append(f"What turned out: {reason}")
+            rule = ("Put it right the way a commentator does on air (\"No, ...\", \"Actually, ...\"), briefly, "
+                    "with the reason in plain words.")
         else:
             for role, pid in before.named.items():
                 if named.get(role) not in (None, pid):
                     facts.append(f"You named {self._player(pid, view, brief=True)} as the {ROLE_WORDS[role]}; "
                                  f"it was actually {self._player(named[role], view, brief=True)}.")
-            facts.append(f"Why: {reason}")
-            rule = "Correct the name briefly and plainly (e.g. \"Correction: ...\"), giving the reason."
+            facts.append(f"What turned out: {reason}")
+            rule = "Put the name right the way a commentator does on air, briefly."
         if e.type == "goal":
             facts.append(self._score(view))
         return Item("correction", facts, rule, r.entry_id, r.status, named, (half, second))
 
     def _background(self, view: View) -> Item:
         half, teams, kits = view.time[0], self.prematch["teams"], self.prematch["jersey_colors"]
-        facts = [f"{'Kick-off' if half == 1 else 'The second half is under way'}: {teams['home']} ({kits['home'][0]}, home) "
-                 f"against {teams['away']} ({kits['away'][0]}, away)."]
+        facts = [f"{'Kick-off' if half == 1 else 'The second half is under way'}: {teams['home']}, in {kits['home'][0]} "
+                 f"at home, against {teams['away']} in {kits['away'][0]}."]
         if half == 1:
+            fronts = []
             for side in ("home", "away"):
                 starters = [p for p in self.prematch["players"] if p["team_side"] == side and p["starting"]]
                 forwards = [p["short_name"] for p in starters if p["position"] == "forward"]
-                facts.append(f"{teams[side]} start with {', '.join(forwards) or 'their usual XI'} up front.")
+                if forwards:
+                    fronts.append(f"{' and '.join(forwards)} for {teams[side]}")
+            if fronts:
+                facts.append("Up front: " + "; ".join(fronts) + ".")
         else:
             facts.append(self._score(view))
-        return Item("background", facts, "Open the half in one sentence.", t_event=None)
+        return Item("background", facts, "Welcome the viewers and open the half in one or two short spoken sentences.",
+                    t_event=None)
 
     def _recap(self, view: View) -> Item:
         teams = self.prematch["teams"]
-        facts = [f"It is {self._clock(*view.time)}.", self._score(view)]
+        facts = [f"Time: {self._clock(*view.time)}.", self._score(view)]
         for side in ("home", "away"):
             stats = view.team_stats[side]
             parts = [f"{stats[t]} {EVENT_WORDS[t]}{'s' if stats[t] != 1 else ''}" for t in ("shot", "corner") if stats[t]]
             if parts:
-                facts.append(f"{teams[side]} so far: {', '.join(parts)} (confirmed only).")
-        return Item("recap", facts, "Sum up the state of the match in one sentence.")
+                facts.append(f"{teams[side]} so far: {', '.join(parts)}.")
+        return Item("recap", facts, "Remind the viewers how the match stands, in one easy sentence; don't list every number.")
 
     # ---- helpers ----
 
@@ -248,14 +258,15 @@ class CommentaryPolicy:
         return half, (lo + hi) / 2, bool(seen)
 
     def _support(self, view: View, eid: str) -> str:
-        """What confirmed an entry, in words: an arbiter's check, a replay, or two sightings."""
+        """What made an entry certain, as a commentator would put it: a second look (the arbiter's
+        check), the replay, or no doubt about it (two sightings agree)."""
         mem = view.mem
         holding = [j for _, j in mem.justifications[eid] if j.obs_id not in mem.rejected]
         if any(j.kind == "verdict" for j in holding):
-            return "checked against the footage by the arbiter"
+            return "a second look at the pictures confirms it"
         if any(self.sources.get(j.obs_id, {}).get("candidate", {}).get("replay") for j in holding):
             return "the replay shows it"
-        return "seen by two independent sightings"
+        return "no doubt about it"
 
     def _reason(self, view: View, eid: str) -> str:
         """Why an entry changed: the summary of the verdict that rejected its observations or
@@ -271,14 +282,14 @@ class CommentaryPolicy:
                 if not isinstance(a, dict):
                     continue
                 if a.get("observation") in obs or (a.get("op") == "identity" and tuple(a.get("track") or ()) in tracks):
-                    return v.get("summary") or "a second look at the footage"
+                    return v.get("summary") or "a second look at the pictures"
         if mem.open_cases(eid):
-            return "it is now disputed and under review"
-        return "a second look at the footage"
+            return "it is now in doubt"
+        return "a second look at the pictures"
 
     def _score(self, view: View) -> str:
         teams = self.prematch["teams"]
-        return f"Score now: {teams['home']} {view.score['home']}-{view.score['away']} {teams['away']}."
+        return f"Score now: {teams['home']} {view.score['home']}, {teams['away']} {view.score['away']}."
 
     def _phrase(self, e) -> str:
         """"a corner for Chelsea"; "a corner" when the side is unknown."""
@@ -287,17 +298,19 @@ class CommentaryPolicy:
         return WITH_TEAM[e.type].format(team=self.prematch["teams"][e.team])
 
     def _player(self, pid: str, view: View, ty: str | None = None, brief: bool = False) -> str:
+        """A player as a commentator names them — by the name fans use — with the background the
+        line may draw on (DESIGN.md §6.9): full name, side and position, and how many of this kind
+        of event they have had in the match when it is not their first."""
         p = self.players[pid]
-        name = f"#{p['jersey_number']} {p['long_name']}"
-        role = p["position"] or ("substitute" if not p["starting"] else "")
-        name += f" ({self.prematch['teams'][p['team_side']]}{', ' + role if role and not brief else ''})"
-        # Background from the match so far (DESIGN.md §6.9): the count of this kind of event,
-        # when it is not the player's first.
+        team = self.prematch["teams"][p["team_side"]]
+        if brief:
+            return f"{p['short_name']} ({team})"
+        role = p["position"] or ("substitute" if not p["starting"] else "player")
+        out = f"{p['short_name']} (full name {p['long_name']}; {team} {role})"
         n = view.player_stats.get(pid, {}).get(ty, 0) if ty else 0
-        if n >= 2 and not brief:
-            nth = f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
-            name += f"; his {nth} {EVENT_WORDS[ty]} of the match"
-        return name
+        if n >= 2:
+            out += f"; his {_ordinal(n)} {EVENT_WORDS[ty]} of the match"
+        return out
 
     @staticmethod
     def _clock(half: int, second: float) -> str:
@@ -307,23 +320,38 @@ class CommentaryPolicy:
         name = "first" if half == 1 else "second"
         if minute > 45:
             return f"{name}-half stoppage time"
-        nth = f"{minute}{'th' if 10 <= minute % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(minute % 10, 'th')}"
-        return f"the {nth} minute of the {name} half"
+        return f"the {_ordinal(minute)} minute of the {name} half"
 
 
-PROMPT = """You are the live TV commentator of a football match. Say ONE spoken line of at most {max_words} words in
-{language}, made only from the material below.
-- Use only the facts given: never add a player, a number, a time or any detail that is not in the material.
+def _ordinal(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def _plain(reason: str) -> str:
+    """A verdict's summary without the system's codes — entry and case ids, track keys, shirt
+    numbers, clock times to the tenth — which a commentator would never say."""
+    reason = re.sub(r"\(?\btracks? \d+/\d+/\d+\)?", "", reason)
+    reason = re.sub(r"\(?\b[ECI]\d+\b\)?|#\d+|\(\s*\)|\b\d{1,2}:\d{2}(\.\d+)?\b", "", reason)
+    return re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s{2,}", " ", reason)).strip()
+
+
+PROMPT = """You are the TV commentator of this football match, speaking live on air in {language}. Give your next line:
+what you would actually say into the microphone now, at most {max_words} words.
+- Speak, don't write: short spoken sentences, present tense, the rhythm of live commentary. Many lines are just a
+  few words ("Corner to Liverpool.", "Costa... and it's in!"); save the big lines for the big moments.
+- Call players by the name given first; never say shirt numbers, positions in brackets, clock times to the second,
+  or anything about how you know it ("sightings", "the system", "the arbiter", "memory").
+- Use only what the material gives: never add a player, a number or a detail that is not in it.
 - {rule}
-- Sound like live commentary, not a report: vary how your lines start and are built; no hashtags or emojis.
+- Don't repeat your recent lines or start the same way as them.
 
-Your last lines (do not repeat them):
+Your recent lines:
 {history}
 
 Material ({kind}):
 {facts}
 
-Answer with JSON only: {{"line": "..."}}"""
+Answer with JSON only: {{"line": "...", "tone": "excited" | "lively" | "calm"}} — the tone to say it in."""
 
 
 class Commentator:
@@ -333,16 +361,35 @@ class Commentator:
         self.cfg = config
         self.generate = generate
 
-    def line(self, item: Item, history: Sequence[str]) -> tuple[str, float, str]:
-        """(the line, the call's latency in s, its call id)."""
+    def line(self, item: Item, history: Sequence[str]) -> tuple[str, str, float, str]:
+        """(the line, the tone to say it in, the call's latency in s, its call id)."""
         prompt = PROMPT.format(max_words=self.cfg["max_words"], language=self.cfg["language"], rule=item.rule,
                                kind=item.kind, facts="\n".join(f"- {f}" for f in item.facts),
                                history="\n".join(f"- {h}" for h in history[-self.cfg["history"]:]) or "(none yet)")
         result = self.generate([prompt])
-        text = parse_json(result.text).get("line") or result.text.strip()
-        return str(text).strip(), result.latency, result.call_id
+        answer = parse_json(result.text)
+        text = str(answer.get("line") or result.text).strip()
+        tone = answer.get("tone") if answer.get("tone") in ("excited", "lively", "calm") else "lively"
+        return text, tone, result.latency, result.call_id
 
 
 def speaking_time(text: str, words_per_second: float) -> float:
-    """How long a line takes to say, in s."""
+    """How long a line takes to say, in s, when there is no audio to measure."""
     return max(1.5, len(text.split()) / words_per_second)
+
+
+def schedule(lines: list[dict], config: Mapping[str, Any]) -> None:
+    """Set each line's "show" (half, start, end) on its half video, in place: the broadcast output
+    runs `output_delay` s behind the feed (DESIGN.md §6.9 D3), so a line ready at t is shown with
+    the video at t - output_delay — but never before the event it speaks of is on screen, nor over
+    the previous line. It lasts as long as its audio (or its estimated speaking time)."""
+    prev = {1: 0.0, 2: 0.0}
+    for line in lines:
+        half, ready = line["t_ready"]
+        start = ready - config["output_delay"]
+        if line.get("t_event"):
+            start = max(start, line["t_event"][1] + 1.0)
+        start = max(start, prev[half], 0.0)
+        end = start + (line.get("duration") or speaking_time(line["text"], config["words_per_second"]))
+        prev[half] = end
+        line["show"] = (half, start, end)

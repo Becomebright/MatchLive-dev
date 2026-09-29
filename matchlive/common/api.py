@@ -7,6 +7,8 @@ Replaying from the cache is what lets offline runs apply a result at "issue time
 measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share calls whose
 inputs are identical. The key does not depend on the endpoint: the same model answers the
 same request wherever it is reached, so answers cached before a change of endpoint stay valid.
+Text-to-speech for the commentary (speech()) goes through the same endpoints and is cached the
+same way, as MP3 files.
 
 The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
 (configs/api.local.yaml, gitignored: keys never go into the repo), in order: the next one takes
@@ -45,11 +47,20 @@ class APIResult:
     cached: bool
 
 
+@dataclass(frozen=True)
+class SpeechResult:
+    call_id: str
+    path: Path          # the MP3 in the speech cache
+    latency: float      # seconds, measured when the call was actually made
+    cached: bool
+
+
 class APIClient:
     def __init__(self, config: dict[str, Any], cache_dir: Path):
         # `config` is the `api` section of the YAML config.
         self.config = config
         self.cache_dir = cache_dir / config["cache"]
+        self.speech_dir = cache_dir / config.get("speech_cache", "tts")
         self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
         self._current = 0                        # the endpoint in use; the next takes over when it gives out
         self._lock = threading.Lock()
@@ -69,32 +80,67 @@ class APIClient:
                 d = json.load(f)
             return APIResult(call_id, d["text"], d["model"], d["latency"], cached=True)
 
-        with self._lock:
-            # The SDK clients, created once even when several threads call at the same time.
-            if self._clients is None:
-                self._clients = self._connect()
         content = [{"type": "text", "text": p} if isinstance(p, str) else
                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode()}}
                    for p in parts]
         extra = {"response_format": {"type": "json_object"}} if json_output else {}
-        # Transient errors (overload, timeouts) are retried with backoff on the same endpoint; an
-        # endpoint out of quota, or failing this request `switch_after` times in a row, hands over to
-        # the next one at once. The latency kept is the successful attempt's, as a cached replay has
-        # nothing else to go on.
+
+        def call(client):
+            resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}], **extra)
+            message = resp.choices[0].message if resp.choices else None
+            text = (message.content if message else None) or _from_tool_calls(message)
+            # Now and then an answer comes back with no text at all; it is not cached.
+            if not text:
+                raise ValueError(f"empty response (finish {resp.choices[0].finish_reason if resp.choices else None})")
+            return resp, text
+
+        (resp, text), latency, client = self._call(call)
+        d = {"text": text, "model": resp.model or model, "latency": latency,
+             "usage": resp.usage.model_dump(mode="json") if resp.usage else None,
+             "endpoint": str(client.base_url)}
+        _write(path, json.dumps(d).encode())
+        return APIResult(call_id, d["text"], d["model"], latency, cached=False)
+
+    def speech(self, text: str, voice: str, instructions: str, model: str) -> SpeechResult:
+        """`text` spoken by `voice` in the manner `instructions` describe (text-to-speech, MP3),
+        cached like generate() under the hash of the request, in paths.cache/<api.speech_cache>."""
+        request = {"model": model, "voice": voice, "instructions": instructions, "text": text, "format": "mp3"}
+        call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
+        path = self.speech_dir / f"{call_id}.mp3"
+        meta = path.with_suffix(".json")
+        if path.exists() and meta.exists():
+            return SpeechResult(call_id, path, json.loads(meta.read_text())["latency"], cached=True)
+
+        def call(client):
+            audio = client.audio.speech.create(model=model, voice=voice, input=text, instructions=instructions,
+                                               response_format="mp3").read()
+            if not audio:
+                raise ValueError("empty audio")
+            return audio
+
+        audio, latency, client = self._call(call)
+        _write(path, audio)
+        _write(meta, json.dumps({"latency": latency, "model": model, "endpoint": str(client.base_url)}).encode())
+        return SpeechResult(call_id, path, latency, cached=False)
+
+    def _call(self, call):
+        """Run `call(sdk client)` against the endpoints: transient errors (overload, timeouts) are
+        retried with backoff on the same endpoint; an endpoint out of quota, or failing this request
+        `switch_after` times in a row, hands over to the next one at once. Returns (what `call`
+        returned, the successful attempt's latency — all a cached replay has to go on — and the
+        client that answered)."""
+        with self._lock:
+            # The SDK clients, created once even when several threads call at the same time.
+            if self._clients is None:
+                self._clients = self._connect()
         failures = 0
         for attempt in range(self.config.get("max_attempts", 1)):
             current = self._current
             client = self._clients[current]
             try:
                 t0 = time.perf_counter()
-                resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}], **extra)
-                latency = time.perf_counter() - t0
-                message = resp.choices[0].message if resp.choices else None
-                text = (message.content if message else None) or _from_tool_calls(message)
-                # Now and then an answer comes back with no text at all; it is not cached.
-                if not text:
-                    raise ValueError(f"empty response (finish {resp.choices[0].finish_reason if resp.choices else None})")
-                break
+                out = call(client)
+                return out, time.perf_counter() - t0, client
             except Exception as e:  # noqa: BLE001 — any API failure is retried the same way
                 if attempt + 1 == self.config.get("max_attempts", 1):
                     raise
@@ -108,17 +154,6 @@ class APIClient:
                     failures = 0
                     continue
                 time.sleep(min(5 * 2 ** attempt, self.config.get("max_backoff", 120)))
-        d = {"text": text, "model": resp.model or model, "latency": latency,
-             "usage": resp.usage.model_dump(mode="json") if resp.usage else None,
-             "endpoint": str(client.base_url)}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename so an interrupted run never leaves a truncated cache entry. The temp
-        # name is per process and thread: parallel runs (ablations) may make the same request.
-        tmp = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
-        with open(tmp, "w") as f:
-            json.dump(d, f)
-        tmp.replace(path)
-        return APIResult(call_id, d["text"], d["model"], latency, cached=False)
 
     def _connect(self) -> list:
         """One SDK client per endpoint of the local file `api.endpoint`, in its order."""
@@ -134,6 +169,15 @@ class APIClient:
         # hanging for good.
         return [OpenAI(base_url=e["base_url"], api_key=e["api_key"], max_retries=0,
                        timeout=self.config.get("timeout", 180)) for e in endpoints]
+
+
+def _write(path: Path, data: bytes) -> None:
+    """Write-then-rename, so an interrupted run never leaves a truncated cache entry. The temp name is
+    per process and thread: parallel runs (ablations) may make the same request."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
 
 
 def _out_of_quota(e: Exception) -> bool:

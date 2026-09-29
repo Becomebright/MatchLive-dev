@@ -509,17 +509,19 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client) 
     (DESIGN.md §5.4), so driving it from the log after the run gives the lines a live run would
     have given with the same latencies. Every `tick` s while nobody is speaking, the policy looks
     at memory as known then; what it picks goes to the generator (one model call through
-    `client`), whose line is ready at the decision time + the call's latency and keeps the
-    commentator busy for as long as it takes to say. A call that fails after its retries loses
-    the line, as it would live.
+    `client`), then to the voice (one text-to-speech call). The line is ready at the decision time
+    + both calls' latencies and keeps the commentator busy for as long as its audio lasts. A
+    generation that fails after its retries loses the line, as it would live; a failed synthesis
+    leaves it a subtitle only.
 
-    Returns one record per line: its kind, entry, text, the entry's status and the players the
-    line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
-    (t_event), and the call id and latency.
+    Returns one record per line: its kind, entry, text and tone, the entry's status and the players
+    the line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
+    (t_event), the audio (path, duration), and the calls' ids and latencies.
     """
     import json
 
     from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
+    from matchlive.app.tts import Voice
     from matchlive.common.api import NoAPIKey
     from matchlive.events.analyzer import clock
 
@@ -531,6 +533,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client) 
     half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
     policy = CommentaryPolicy(cfg, match.prematch, sources)
     commentator = Commentator(cfg, lambda parts: client.generate(parts, json_output=True))
+    voice = Voice(cfg["voice"], client.speech)
     lines: list[dict] = []
     for half in (1, 2):
         t, free = 0.0, 0.0
@@ -539,19 +542,28 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client) 
                 item = policy.decide(mem.at((half, t)))
                 if item is not None:
                     try:
-                        text, latency, call_id = commentator.line(item, [line["text"] for line in lines])
+                        text, tone, latency, call_id = commentator.line(item, [line["text"] for line in lines])
                     except NoAPIKey:
                         raise
                     except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
                         print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
                         t += cfg["tick"]
                         continue
-                    ready = t + latency
-                    free = ready + speaking_time(text, cfg["words_per_second"])
+                    try:
+                        spoken = voice.say(text, tone)
+                        audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
+                    except NoAPIKey:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
+                        print(f"{half}H {t:.0f}s no voice: {e}", flush=True)
+                        audio, duration, tts_latency = None, speaking_time(text, cfg["words_per_second"]), 0.0
+                    ready = t + latency + tts_latency
+                    free = ready + duration
                     policy.said(item, text, (half, ready))
                     lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
-                                  "text": text, "t_decide": (half, t), "t_ready": (half, ready),
-                                  "t_event": item.t_event, "facts": item.facts, "call_id": call_id, "latency": latency})
-                    print(f"{half}H {clock(ready)} [{item.kind}] {text}", flush=True)
+                                  "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
+                                  "t_event": item.t_event, "facts": item.facts, "call_id": call_id, "latency": latency,
+                                  "audio": audio, "duration": duration, "tts_latency": tts_latency})
+                    print(f"{half}H {clock(ready)} [{item.kind}/{tone}] {text}", flush=True)
             t += cfg["tick"]
     return lines
