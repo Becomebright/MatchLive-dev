@@ -175,17 +175,17 @@ class CommentaryPolicy:
         facts = [f"Event: {self._phrase(e)}" + (" (seen in a replay)" if replay else "") + "."]
         for role, pid in named.items():
             facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid, view, e.type)}")
-        if e.type == "goal":
-            facts.append(self._score(view))
         if r.status == "confirmed":
+            if e.type == "goal":                  # the score counts confirmed goals only
+                facts.append(self._score(view))
             facts.append(f"Status: confirmed ({self._support(view, r.entry_id)}).")
             rule = "Say it as fact" + (", naming the player(s) given." if named else "; no player is identified, so name none.")
         elif e.type in self.cfg["confirm"]:
             facts.append("Status: not confirmed yet (seen once so far, or disputed).")
             rule = "It is not confirmed: hedge it (e.g. \"looks like\") and name no player, only the team."
         else:
-            facts.append("Status: not confirmed yet.")
-            rule = "Name no player, only the team."
+            # A pending minor event is simply said without a player (DESIGN.md §6.9: the team only).
+            rule = "Name no player, only the team; do not talk about confirmation."
         if kind == "confirmation":
             facts.append(f"You said earlier: \"{before.text}\"")
             rule = ("Earlier you mentioned this tentatively or without the player; now it is confirmed: say so"
