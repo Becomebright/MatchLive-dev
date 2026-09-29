@@ -61,10 +61,13 @@ commentary:
   # video at (ready time - output_delay), but never before the event it speaks of is on screen.
   output_delay: 60
 
-# LLM API (DESIGN.md §2 principle 9), called through the google.genai SDK; responses cached
-# under paths.cache/<cache>, keyed by model + request.
+# LLM API (DESIGN.md §2 principle 9), called through an OpenAI-compatible endpoint; responses
+# cached under paths.cache/<cache>, keyed by model + request.
 api:
-  api_key_env: GOOGLE_API_KEY          # read from the environment, never stored in a file
+  # Base URL and key, in a local file that is never committed (configs/*.local.yaml is gitignored):
+  #   base_url: https://.../v1
+  #   api_key: sk-...
+  endpoint: configs/api.local.yaml
   model: gemini-3.8-flash
   cache: api
   max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most max_backoff)
