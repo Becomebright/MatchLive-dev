@@ -31,7 +31,7 @@ substitutions at the final whistle).
 
 ### Reproduce the reported results from the shared caches
 
-With the environment and the assets of `docs/SETUP.md` §2–3 (including `cache/*`), the recorded
+With the prerequisites, environment and assets of `docs/SETUP.md` §0–3 (including `cache/*`), the recorded
 runs replay exactly: no GPU work and no API key, every model answer comes from `cache/api/`. If
 anything diverged, a request would miss the cache and the run would stop with `NoAPIKey`.
 
