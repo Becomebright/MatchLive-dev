@@ -6,7 +6,8 @@ hedged, which players it named, and what it corrected (DESIGN.md §6.9).
 Claims come from outputs/commentary/<match>/<run>/lines.jsonl (scripts/run_commentary.py). A line
 about an event entry claims the event happened — as fact if the entry was confirmed when it was
 said, hedged if pending — and names the players memory had identified on a confirmed entry. An
-entry is true when it matches a true event (scripts/eval_memory.assign on the run's final memory);
+entry is true when it matches a true event (scripts/eval_memory.assign on the run's final memory),
+or a verdict replaced it with a fuller entry that does (the same event, with who took part);
 a named player is checked where the labels name one (goals, cards, substitutions). A correction
 is right when the entry it retracts is false, or when the player it names instead is the true one.
 
@@ -15,7 +16,8 @@ announced type aired as fact the moment memory writes it, naming the players mem
 then, never corrected — read straight from the op log, no model call.
 
 The generated text itself is checked for names the material did not give: a roster player named
-in a line but in none of its facts is the generator adding a name.
+in a line but in none of its facts (nor in who-is-who of the frames a play line is written over)
+is the generator adding a name.
 
 Coverage: the visible true events some line spoke of (news or a confirmation). Style, next to the
 broadcast's own commentary (scripts/transcribe_broadcast.py): the share of match time spoken, words
@@ -33,7 +35,7 @@ import numpy as np
 
 from eval_memory import MATCHES, assign                 # scripts/eval_memory.py
 from ground_truth import _mentions, ground_truth         # scripts/ground_truth.py
-from matchlive.app.commentary import ROLE_WORDS
+from matchlive.app.commentary import ROLE_WORDS, replacement
 from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.memory.store import MatchMemory
@@ -146,6 +148,10 @@ def main():
                 mem._apply(op)
             events = {eid: e for eid, e in mem.entries.items() if isinstance(e, Event) and e.type != "injury"}
             true_of = assign(mem, events, truth)
+            # A line about an entry a verdict replaced with a fuller one (the same event, with who
+            # took part) speaks of the event the new entry matches.
+            true_of.update({eid: true_of[new] for eid in events if eid not in true_of
+                            for new in [replacement(mem, eid)] if new in true_of})
             lines = [json.loads(line) for line in open(folder / "lines.jsonl")]
             ours += claims(lines, true_of, truth, events)
             blind += blind_claims(ops, match.prematch["players"], config["loop"]["cascade"],
@@ -168,7 +174,7 @@ def main():
             for line in lines:
                 text["lines"] += 1
                 extra = set(_mentions(line["text"], match.prematch["players"])) \
-                    - set(_mentions("\n".join(line["facts"]), match.prematch["players"]))
+                    - set(_mentions("\n".join(line["facts"] + [line.get("pictures") or ""]), match.prematch["players"]))
                 text["added_names"] += bool(extra)
                 if line["entry"] in true_of and line["kind"] == "news":
                     g = truth[true_of[line["entry"]]]

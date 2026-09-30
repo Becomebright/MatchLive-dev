@@ -625,6 +625,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
             lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
                           "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
                           "t_event": item.t_event, "show": (half, start, start + duration), "facts": item.facts,
+                          "pictures": frames.text if frames is not None else None,   # who is who in its frames
                           "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
                           "tts_latency": tts_latency})
             print(f"{half}H {clock(start)} [{item.kind}/{tone}] {text}", flush=True)

@@ -227,3 +227,46 @@ def test_minor_event_before_a_goal_on_air_is_overtaken_by_it():
     kick = mem.add_entry(T(175), Event("free_kick", "home", ((1, 140), (1, 160))), seen("live#2"))
     mem.add_justification(T(176), kick, seen("replay#2"))
     assert not is_news(ask(p, mem, 176), kick)
+
+
+def test_a_context_line_says_something_new():
+    mem = MatchMemory(PLAYERS)
+    p = policy()
+    every = CONFIG["context_every"]
+    item = air(p, mem, every)
+    assert item.kind == "recap" and any("Homeside 0, Awayside 0" in f for f in item.facts)
+    # Nothing has changed: the score is not said again.
+    assert ask(p, mem, 2 * every).kind != "recap"
+    # A goal changes it: once the goal and the co-commentator's view are on air, the new score is.
+    g = mem.add_entry(T(2 * every + 10), goal(2 * every, player="h1"), seen("live#1"))
+    assert is_news(air(p, mem, 2 * every + 10), g)
+    assert air(p, mem, 2 * every + 20).kind == "analysis"
+    item = ask(p, mem, 3 * every + 30)
+    assert item.kind == "recap" and any("Homeside 1, Awayside 0" in f for f in item.facts)
+
+
+def test_pending_goal_seen_only_in_a_replay_waits_for_its_confirmation():
+    mem = MatchMemory(PLAYERS)
+    # A goal sighting in a replay, with no live one: most often a goal already called, shown again.
+    p = CommentaryPolicy(CONFIG, PREMATCH, sources={"replay#1": {"candidate": {"replay": True, "second": 90}}})
+    p.said(Item("background", [], ""), "Welcome.", T(0))
+    eid = mem.add_entry(T(100), goal(80, player="h1"), seen("replay#1", sufficient=False))
+    assert not is_news(ask(p, mem, 100 + 2 * HOLD), eid)
+    mem.add_justification(T(120), eid, seen("live#2"))
+    assert is_news(ask(p, mem, 120), eid)
+
+
+def test_an_entry_a_verdict_replaced_with_a_fuller_one_is_confirmed_not_corrected():
+    mem = MatchMemory(PLAYERS)
+    change = Event("substitution", "home", ((1, 70), (1, 100)), (Participant("in", track_key=TRACK),))
+    old = mem.add_entry(T(100), change, seen("live#1", sufficient=False))
+    p = policy()
+    assert air(p, mem, 100 + HOLD).entry == old                   # "looks like a change coming"
+    # The arbiter names both players: the old entry is replaced by the fuller one (arbiter/verdict.py).
+    mem.reject_observation(T(150), "live#1")
+    new = mem.add_entry(T(150), Event("substitution", "home", ((1, 80), (1, 90)),
+                                      (Participant("in", player_id="h4"), Participant("out", player_id="h1"))),
+                        Justification("verdict:C1", "verdict", True))
+    item = ask(p, mem, 150)
+    assert (item.kind, item.entry) == ("confirmation", new)
+    assert item.named == {"in": "h4", "out": "h1"}

@@ -8,7 +8,9 @@ over memory — no model call — and picks, for the next line, in order:
   1. correction    something already said no longer holds: an event aired as fact (or an aired
                    goal, card, substitution, penalty) has been retracted, or a player named on air
                    is no longer the one memory holds; the reason is what memory says overturned it
-                   (the arbiter's verdict);
+                   (the arbiter's verdict). An entry a verdict replaced with a fuller one (the same
+                   event, with who took part) is not retracted as far as the viewer is concerned:
+                   what was said of it carries over to the new entry;
   2. confirmation  a goal, card, substitution or penalty aired while pending is now confirmed, or
                    its player has since been identified;
   3. background    the first line of each half: the teams, the score, pre-match facts;
@@ -17,10 +19,14 @@ over memory — no model call — and picks, for the next line, in order:
                    (the same kind by the same side, or the other half of one incident: a goal and
                    the shot it came from, a foul and its free kick or card), a disputed one (a member
                    of an open case: it waits for the verdict), and a pending one before `hold` s (a
-                   pending minor one not at all, unless `pending_minor`: half of them are false);
-  5. context       every `context_every` s: one angle on how the match stands (score, counts,
-                   who has the pressure, bookings, the busiest player);
-  6. play          otherwise, the play on screen, written over the frames on air (the generator
+                   pending minor one not at all, unless `pending_minor`: half of them are false; nor
+                   a pending one seen only in replays: a replay re-shows what the viewer has seen,
+                   so it is most often an event already called, or none);
+  5. analysis      the co-commentator's view, right after a goal, card or change has been called;
+  6. context       every `context_every` s: one angle on how the match stands (score, counts,
+                   who has the pressure, bookings, the busiest player) that has something new;
+  7. analysis      every `analysis_every` s, the co-commentator's view of the play;
+  8. play          otherwise, the play on screen, written over the frames on air (the generator
                    is told not to call events: those come from memory, once certain).
 Wording follows each event's status (DESIGN.md §6.9): a confirmed event names its players (those
 memory has identified); a pending one names only the team — and a pending goal, card, penalty or
@@ -60,6 +66,26 @@ INCIDENTS = {frozenset(p) for p in (("goal", "shot"), ("foul", "free_kick"), ("o
                                     ("foul", "yellow_card"), ("foul", "red_card"))}
 
 
+def replacement(mem: Any, eid: str) -> str | None:
+    """The entry a verdict replaced a retracted event entry with, if any. A verdict that names
+    everyone who took part in an event replaces the entry it matches: it rejects that entry's
+    observations and adds the fuller event, all at the time the case closes (DESIGN.md §6.6,
+    arbiter/verdict.py). What was said of the old entry still holds through the new one."""
+    e = mem.entries[eid]
+    when = [mem.rejected.get(j.obs_id) for _, j in mem.justifications[eid]]
+    if not when or None in when:
+        return None                                    # not retracted
+    t = max(when)
+    for other, o in mem.entries.items():
+        if other == eid or getattr(o, "type", None) != e.type or o.team != e.team:
+            continue
+        t0, j0 = mem.justifications[other][0]
+        # Added by a verdict in the same write as the last rejection, and about the same moment.
+        if t0 == t and j0.kind == "verdict" and o.t_interval[0] <= e.t_interval[1] and e.t_interval[0] <= o.t_interval[1]:
+            return other
+    return None
+
+
 @dataclass
 class Aired:
     """What was said about one event entry, as of the last line about it."""
@@ -79,6 +105,7 @@ class Item:
     named: dict[str, str] = field(default_factory=dict)   # role -> player the line may name
     t_event: Time | None = None             # when the event happened (best estimate)
     event_type: str | None = None           # the event's type, for a line about an event
+    angle: tuple | None = None              # (angle, value) a context line is about
 
 
 class CommentaryPolicy:
@@ -92,6 +119,7 @@ class CommentaryPolicy:
         self.players = {p["hash"]: p for p in prematch["players"]}
         self.aired: dict[str, Aired] = {}
         self.skipped: set[str] = set()           # news that could not go on air in time
+        self.context_said: dict[str, tuple] = {}  # context angle -> (value, video second) last said
         self.last_line: Time | None = None       # video time of the last line on air
         self.last_context: Time | None = None    # ... and of the last line on how the match stands
         self.halves_opened: set[int] = set()
@@ -111,6 +139,16 @@ class CommentaryPolicy:
         at_air = mem.at(on_air, known_by=view.time)       # the match as of the moment on air
         records = {r.entry_id: r for r in view.events()}
         confirm, announce = self.cfg["confirm"], self.cfg["announce"]
+
+        # An aired entry a verdict replaced with a fuller one: what was said carries over to the
+        # new entry (which may add the names), and the old one needs no correction.
+        for eid, a in list(self.aired.items()):
+            r = records.get(eid)
+            if a.status != "retracted" and r is not None and r.status == "retracted":
+                new = replacement(mem, eid)
+                if new is not None and new not in self.aired:
+                    self.aired[new] = a
+                    self.aired[eid] = Aired("retracted", {}, a.text)
 
         # 1-2. What was aired and has changed since.
         for eid, a in self.aired.items():
@@ -152,7 +190,9 @@ class CommentaryPolicy:
         # 6. Now and then, how the match stands.
         if self.last_context is None or self.last_context[0] != on_air[0] \
                 or on_air[1] - self.last_context[1] >= self.cfg["context_every"]:
-            return self._recap(at_air)
+            item = self._recap(at_air)
+            if item is not None:
+                return item
 
         # 7. Now and then, the co-commentator's view of the play.
         if self.last_analysis is None or self.last_analysis[0] != on_air[0] \
@@ -170,6 +210,8 @@ class CommentaryPolicy:
             self.last_analysis = on_air
         if item.kind in ("background", "recap"):
             self.last_context = on_air
+        if item.angle is not None:
+            self.context_said[item.angle[0]] = (item.angle[1], on_air[1])
         if item.kind == "analysis":
             self.last_analysis, self.big_since_analysis = on_air, False
         if item.entry is not None:
@@ -204,10 +246,11 @@ class CommentaryPolicy:
         member of an open case) waits for the case to be settled: the dispute is most often a replay
         taken for a new goal, or one card reported twice. A pending one waits `hold` s for its
         confirmation, and then goes on air hedged only if it is a goal, card, penalty or
-        substitution — or any type, with `pending_minor`."""
+        substitution — or any type, with `pending_minor` — and was seen live: one seen only in
+        replays waits for its confirmation (a replay re-shows what the viewer has already seen)."""
         if r.status == "confirmed":
             return True
-        if view.mem.open_cases(r.entry_id):
+        if view.mem.open_cases(r.entry_id) or self._when(view, r)[2]:
             return False
         written = view.mem.justifications[r.entry_id][0][0]
         waited = view.time[1] - written[1] if written[0] == view.time[0] else float("inf")
@@ -249,7 +292,9 @@ class CommentaryPolicy:
         if r.status == "confirmed":
             if e.type == "goal":                  # the score counts confirmed goals only, up to this one
                 facts.append(self._score(view.mem.at(e.t_interval[1], known_by=view.time)))
-            facts.append(f"Certain: {self._support(view, r.entry_id)}.")
+            support = self._support(view, r.entry_id)
+            if support:
+                facts.append(f"Seen: {support}.")
             rule = "Call it as it happens" + (", naming the player(s) given." if named
                                               else "; you don't know who it was, so name nobody.")
         elif e.type in self.cfg["confirm"]:
@@ -302,35 +347,46 @@ class CommentaryPolicy:
         return Item("background", facts, "Welcome the viewers and open the half in one or two short spoken sentences.",
                     t_event=None)
 
-    def _recap(self, view: View) -> Item:
-        """How the match stands at the moment on air (`view` is the match as of then): the time, the
-        score, the counts, who has had the recent pressure, cards and changes, the most active
-        players. The line picks one angle."""
+    def _recap(self, view: View) -> Item | None:
+        """One angle on how the match stands at the moment on air (`view` is the match as of then):
+        the score, a side's counts, who has had the recent pressure, a booking, the busiest player.
+        An angle is offered only when there is something new in it since it was last said (the
+        score or the pressure changed, a new booking, ...) or it has not been said for a while; the
+        angles take turns. None when there is nothing new to say."""
         teams = self.prematch["teams"]
         half, now = view.time
-        facts = [f"Time: {self._clock(half, now)}.", self._score(view)]
+        angles = []                                 # (angle, value, fact)
+        angles.append(("score", tuple(view.score.values()), self._score(view)))
+        recent = Counter(r.event.team for r in view.events(since=(half, max(0.0, now - 600)), status="confirmed")
+                         if r.event.team and r.event.type in ("shot", "corner", "goal", "free_kick"))
+        if sum(recent.values()) >= 3:
+            lead = max(recent, key=recent.get)
+            angles.append(("pressure", lead, f"Last ten minutes: {teams[lead]} have had most of the attacking play "
+                                             f"({recent[lead]} of {sum(recent.values())} shots, corners and free kicks)."))
         for side in ("home", "away"):
             stats = view.team_stats[side]
             parts = [f"{stats[t]} {EVENT_WORDS[t]}{'s' if stats[t] != 1 else ''}"
                      for t in ("shot", "corner", "free_kick", "offside") if stats[t]]
             if parts:
-                facts.append(f"{teams[side]} so far: {', '.join(parts)}.")
-        recent = Counter(r.event.team for r in view.events(since=(half, max(0.0, now - 600)), status="confirmed")
-                         if r.event.team and r.event.type in ("shot", "corner", "goal", "free_kick"))
-        if sum(recent.values()) >= 3:
-            lead = max(recent, key=recent.get)
-            facts.append(f"Last ten minutes: {teams[lead]} have had most of the attacking play "
-                         f"({recent[lead]} of {sum(recent.values())} shots, corners and free kicks).")
+                angles.append((f"counts:{side}", tuple(parts), f"{teams[side]} so far: {', '.join(parts)}."))
         for c in view.cards:
             if c.player_id:
-                facts.append(f"Booked: {self._player(c.player_id, view, brief=True)}.")
+                angles.append((f"booked:{c.player_id}", c.kind, f"Booked earlier: {self._player(c.player_id, view, brief=True)}."))
         busiest = sorted(((n, pid) for pid, st in view.player_stats.items() for ty, n in st.items() if ty == "shot"),
                          reverse=True)[:1]
         if busiest and busiest[0][0] >= 2:
             n, pid = busiest[0]
-            facts.append(f"Most shots so far: {self._player(pid, view, brief=True)}, {n}.")
-        return Item("recap", facts, "Pick ONE of these facts and work it into a natural remark on how the match "
-                                    "stands; don't list numbers.", t_event=None)
+            angles.append(("busiest", (pid, n), f"Most shots so far: {self._player(pid, view, brief=True)}, {n}."))
+        # What is new: an angle never said, or said with another value, or not said for `context_stale` s.
+        fresh = [a for a in angles if a[0] not in self.context_said or self.context_said[a[0]][0] != a[1]
+                 or now - self.context_said[a[0]][1] >= self.cfg["context_stale"]]
+        if not fresh:
+            return None
+        # Take turns: the angle said longest ago (never said first).
+        angle, value, fact = min(fresh, key=lambda a: self.context_said.get(a[0], (None, -1.0))[1])
+        facts = [f"Time: {self._clock(half, now)}.", fact]
+        return Item("recap", facts, "Work this into a natural remark on how the match stands; don't list numbers.",
+                    t_event=None, angle=(angle, value))
 
     def _analysis(self, view: View, on_air: Time) -> Item:
         """The co-commentator's view, written over the last `analysis_span` s of pictures (after a
@@ -361,14 +417,14 @@ class CommentaryPolicy:
 
     def _support(self, view: View, eid: str) -> str:
         """What made an entry certain, as a commentator would put it: a second look (the arbiter's
-        check), the replay, or no doubt about it (two sightings agree)."""
+        check) or the replay; nothing when two sightings simply agree."""
         mem = view.mem
         holding = [j for _, j in mem.justifications[eid] if j.obs_id not in mem.rejected]
         if any(j.kind == "verdict" for j in holding):
             return "a second look at the pictures confirms it"
         if any(self.sources.get(j.obs_id, {}).get("candidate", {}).get("replay") for j in holding):
             return "the replay shows it"
-        return "no doubt about it"
+        return ""
 
     def _reason(self, view: View, eid: str) -> str:
         """Why an entry changed: the summary of the verdict that rejected its observations or

@@ -44,10 +44,11 @@ qa:
 # Live commentary (DESIGN.md §6.9); lines are generated through the `api` section's model.
 commentary:
   tick: 1                              # s of match time between the commentator's looks at memory
-  pause: 3.0                           # s of silence between two lines (a human commentator talks ~55% of the time)
+  pause: 2.0                           # s of silence between two lines (the broadcast commentators talk ~62% of the time)
   late: 4                              # s a play or context line may go on air after the moment it was written for
   late_event: 30                       # ... a line about an event (news, confirmation, correction)
   context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
+  context_stale: 600                   # s after which an angle on the match may be said again unchanged
   play_words: 12                       # a play line is usually this short
   play_span: 6                         # s of pictures a play line is written over
   play_frames: 8                       # frames shown for them
@@ -67,7 +68,7 @@ commentary:
   confirm: [goal, red_card, penalty, yellow_card, substitution]
   max_words: 20                        # per line: spoken lines are short
   language: English
-  history: 5                           # the last lines shown to the generator, so it does not repeat itself
+  history: 10                          # the last lines shown to the generator, so it does not repeat itself
   words_per_second: 2.5                # speaking rate: a line keeps the commentator busy this long
   # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
   # 30-90 s memory needs to learn of an event and the generation call. A line is shown with the
