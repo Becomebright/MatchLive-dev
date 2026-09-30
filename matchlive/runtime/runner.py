@@ -595,7 +595,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
 
             def lateness(ready):
                 start = max(ready - delay, ends)
-                if item.t_event and item.kind not in ("play", "analysis"):
+                if item.t_event and item.t_event[0] == half and item.kind not in ("play", "analysis"):
                     start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
                 return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
 
@@ -614,8 +614,10 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 start, late = lateness(t + latency + tts_latency)
             took.append(latency + speak_took)
             if late:
-                # Ready too late for the moment it was written for (a slow call): live, it is dropped.
+                # Ready too late for the moment it was written for (a slow call): live, it is dropped —
+                # and not picked again (its moment has passed).
                 print(f"{half}H {t:.0f}s [{item.kind}] too late by {start - on_air[1]:.0f} s: dropped", flush=True)
+                policy.dropped(item)
                 t += cfg["tick"]
                 continue
             ready = t + latency + tts_latency

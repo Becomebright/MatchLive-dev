@@ -91,6 +91,7 @@ class CommentaryPolicy:
         self.sources = sources
         self.players = {p["hash"]: p for p in prematch["players"]}
         self.aired: dict[str, Aired] = {}
+        self.skipped: set[str] = set()           # news that could not go on air in time
         self.last_line: Time | None = None       # video time of the last line on air
         self.last_context: Time | None = None    # ... and of the last line on how the match stands
         self.halves_opened: set[int] = set()
@@ -136,7 +137,8 @@ class CommentaryPolicy:
             return self._background(at_air)
 
         # 4. News: the most important unaired event the viewer has seen in the last `recent` s.
-        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.status != "retracted"
+        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.entry_id not in self.skipped
+                 and r.status != "retracted"
                  and r.event.type in announce and self._seen(view, r, on_air) and not self._echoes(r, records)
                  and self._ready(view, r)]
         if fresh:
@@ -174,6 +176,16 @@ class CommentaryPolicy:
             self.aired[item.entry] = Aired(item.status, dict(item.named), text)
         if item.kind in ("news", "confirmation") and item.event_type in self.cfg["confirm"]:
             self.last_big, self.big_since_analysis = item.t_event, True
+
+    def dropped(self, item: Item) -> None:
+        """`item` could not go on air in time: its moment has passed, so it is not picked again — news
+        is skipped, and a confirmation or correction takes what memory now holds as said."""
+        if item.entry is None:
+            return
+        if item.kind == "news":
+            self.skipped.add(item.entry)
+        elif item.entry in self.aired:
+            self.aired[item.entry] = Aired(item.status, dict(item.named), self.aired[item.entry].text)
 
     def _seen(self, view: View, r: EventRecord, on_air: Time) -> bool:
         """Whether the viewer has seen the event by `on_air`, at most `recent` s before it (`recent_minor`

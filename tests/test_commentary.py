@@ -206,6 +206,18 @@ def test_one_incident_is_aired_once_but_a_card_always_is():
     assert is_news(ask(p, mem, 140), card)
 
 
+def test_a_line_that_missed_its_moment_is_not_picked_again():
+    mem = MatchMemory(PLAYERS)
+    eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
+    p = policy()
+    air(p, mem, 100 + HOLD)                                        # aired hedged
+    mem.add_justification(T(140), eid, seen("replay#1"))
+    item = ask(p, mem, 140)
+    assert (item.kind, item.entry) == ("confirmation", eid)
+    p.dropped(item)                                                # not ready in time for its moment
+    assert ask(p, mem, 141).entry != eid
+
+
 def test_minor_event_before_a_goal_on_air_is_overtaken_by_it():
     mem = MatchMemory(PLAYERS)
     g = mem.add_entry(T(170), goal(160, player="h1"), seen("live#1"))
