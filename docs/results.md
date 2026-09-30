@@ -783,7 +783,7 @@ GSR test，COCO AP，置信度 ≥ 0.01，每帧取前 100 个框，TensorRT FP1
 
 ## 23. 解说 v2 → v6：跟着观众画面说、嘉宾分析、降噪（`DESIGN.md` §6.9）
 
-> 2026-09-30。实现：`matchlive/app/commentary.py`（策略和提示词）、`runtime.runner.run_commentary`（按观众时间线驱动）。脚本：`scripts/run_commentary.py --name <版本>`、`scripts/eval_commentary.py`、`scripts/judge_commentary.py`、`scripts/render_stream.py --name <版本>`。测试：`tests/test_commentary.py`，15 个。
+> 2026-09-30。实现：`matchlive/app/commentary.py`（策略和提示词）、`runtime.runner.run_commentary`（按观众时间线驱动）。脚本：`scripts/run_commentary.py --name <版本>`、`scripts/eval_commentary.py`、`scripts/judge_commentary.py`、`scripts/render_stream.py --name <版本>`。测试：`tests/test_commentary.py`，16 个。
 > 输入是 §14 的两次 full 运行（曼联场 `full_retry`）。生成用 `gemini-3.8-flash`，配音用 `gpt-4o-mini-tts`，都经中转接口。v1 就是 §21 的 `full`。
 
 **各版本改了什么**
@@ -841,7 +841,7 @@ GSR test，COCO AP，置信度 ≥ 0.01，每帧取前 100 个框，TensorRT FP1
 
 **分析**
 - **v6 剩下的 11 句错误事件句**：
-  - 9 句是记忆里已经确认的误检小事件（越位 3、任意球 3、射门 1、犯规 1），另有 1 张黄牌，时间比真值晚几秒，没对上。这些要靠提高记忆本身的精度，解说策略管不到。
+  - 9 句是记忆里已经确认的误检小事件（越位 3、任意球 4、射门 1、犯规 1）；1 张已确认的黄牌时间比真值晚几秒，没对上。这些要靠提高记忆本身的精度，解说策略管不到。
   - 1 句是待定黄牌，事后仲裁撤回，也播出了正确的纠正（"No card after all"）。
 - **点名不在素材里的 15 句，基本读自转播方的球员字幕条**，不是生成器编的。抽帧核对过两句：
   - "Six major trophies in two years at PSG for David Luiz"：画面上是 "Won 6 major trophies in 2 years at PSG"；
