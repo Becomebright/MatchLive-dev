@@ -51,6 +51,8 @@ commentary:
   play_words: 12                       # a play line is usually this short
   play_span: 6                         # s of pictures a play line is written over
   play_frames: 8                       # frames shown for them
+  analysis_every: 30                   # s on air between the co-commentator's views of the play
+  analysis_span: 20                    # s of pictures (spread over play_frames frames) a view is given on
   recent: 120                          # s: a goal, card, penalty or substitution is news if the viewer saw it at most this long ago
   recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
   hold: 5                              # s a pending event waits for its confirmation before it may go on air
@@ -80,6 +82,12 @@ commentary:
       excited: "A British football TV commentator calling a big moment live: voice rising, fast, thrilled."
       lively: "A British football TV commentator following the play live: engaged, brisk, natural."
       calm: "A British football TV commentator in a lull: relaxed, warm, conversational."
+    # The co-commentator (a former player giving his view), in a second voice.
+    analyst_voice: onyx
+    analyst_tones:
+      excited: "A former footballer as TV co-commentator, thrilled by what he has just seen: animated, quick."
+      lively: "A former footballer as TV co-commentator giving his opinion: relaxed, knowing, conversational."
+      calm: "A former footballer as TV co-commentator, reflective: low-key, measured, conversational."
 
 # The delayed live stream with commentary (scripts/render_stream.py).
 render:

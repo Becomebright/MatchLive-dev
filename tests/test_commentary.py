@@ -125,10 +125,22 @@ def test_nothing_after_the_moment_on_air_is_said():
 def test_with_nothing_else_to_say_it_describes_the_play():
     p = policy()
     mem = MatchMemory(PLAYERS)
-    p.said(Item("recap", [], ""), "Goalless so far.", T(100))       # a context line was just said
+    p.said(Item("recap", [], ""), "Goalless so far.", T(100))       # a context line was just said,
+    p.said(Item("analysis", [], ""), "They are sitting deep.", T(105))   # and the co-commentator spoke
     item = ask(p, mem, 110)
     assert item.kind == "play"
     assert item.t_event == T(110 - CONFIG["play_span"])            # the pictures it is written over
+
+
+def test_after_a_goal_is_called_the_co_commentator_gives_his_view():
+    mem = MatchMemory(PLAYERS)
+    g = mem.add_entry(T(170), goal(160, player="h1"), seen("live#1"))
+    p = policy()
+    p.said(Item("analysis", [], ""), "They are sitting deep.", T(165))
+    assert is_news(air(p, mem, 170), g)
+    item = ask(p, mem, 176)
+    assert item.kind == "analysis"
+    assert item.t_event == T(176 - CONFIG["analysis_span"])        # the replays of it
 
 
 def test_retracted_fact_is_corrected_with_the_verdict():
@@ -174,7 +186,7 @@ def test_pending_goal_is_aired_again_once_confirmed():
     eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
     p = policy()
     assert air(p, mem, 100 + HOLD).named == {}
-    assert ask(p, mem, 100 + HOLD + 2).kind in ("recap", "play")     # nothing new about it
+    assert ask(p, mem, 100 + HOLD + 2).entry != eid                 # nothing new about it
     mem.add_justification(T(140), eid, seen("replay#1"))
     item = ask(p, mem, 140)
     assert (item.kind, item.entry, item.named) == ("confirmation", eid, {"player": "h1"})

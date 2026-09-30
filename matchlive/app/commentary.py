@@ -95,6 +95,8 @@ class CommentaryPolicy:
         self.last_context: Time | None = None    # ... and of the last line on how the match stands
         self.halves_opened: set[int] = set()
         self.last_big: Time | None = None        # when the last goal, card, penalty or change aired happened
+        self.big_since_analysis = False          # ... and the co-commentator has not spoken since
+        self.last_analysis: Time | None = None   # video time of the co-commentator's last line
 
     # ---- deciding ----
 
@@ -141,12 +143,21 @@ class CommentaryPolicy:
             r = min(fresh, key=lambda r: (announce.index(r.event.type), -r.event.t_interval[1][1]))
             return self._event_item(view, r, "news", self._named(r))
 
-        # 5. Now and then, how the match stands.
+        # 5. The co-commentator's view right after a goal, card or change has been called.
+        if self.big_since_analysis:
+            return self._analysis(at_air, on_air)
+
+        # 6. Now and then, how the match stands.
         if self.last_context is None or self.last_context[0] != on_air[0] \
                 or on_air[1] - self.last_context[1] >= self.cfg["context_every"]:
             return self._recap(at_air)
 
-        # 6. Otherwise, the play on screen.
+        # 7. Now and then, the co-commentator's view of the play.
+        if self.last_analysis is None or self.last_analysis[0] != on_air[0] \
+                or on_air[1] - self.last_analysis[1] >= self.cfg["analysis_every"]:
+            return self._analysis(at_air, on_air)
+
+        # 8. Otherwise, the play on screen.
         return self._play(at_air, on_air)
 
     def said(self, item: Item, text: str, on_air: Time) -> None:
@@ -154,12 +165,15 @@ class CommentaryPolicy:
         self.last_line = on_air
         if item.kind == "background":
             self.halves_opened.add(on_air[0])
+            self.last_analysis = on_air
         if item.kind in ("background", "recap"):
             self.last_context = on_air
+        if item.kind == "analysis":
+            self.last_analysis, self.big_since_analysis = on_air, False
         if item.entry is not None:
             self.aired[item.entry] = Aired(item.status, dict(item.named), text)
         if item.kind in ("news", "confirmation") and item.event_type in self.cfg["confirm"]:
-            self.last_big = item.t_event
+            self.last_big, self.big_since_analysis = item.t_event, True
 
     def _seen(self, view: View, r: EventRecord, on_air: Time) -> bool:
         """Whether the viewer has seen the event by `on_air`, at most `recent` s before it (`recent_minor`
@@ -306,6 +320,13 @@ class CommentaryPolicy:
         return Item("recap", facts, "Pick ONE of these facts and work it into a natural remark on how the match "
                                     "stands; don't list numbers.", t_event=None)
 
+    def _analysis(self, view: View, on_air: Time) -> Item:
+        """The co-commentator's view, written over the last `analysis_span` s of pictures (after a
+        goal, card or change: the replays of it)."""
+        facts = [f"Time: {self._clock(*on_air)}.", self._score(view)]
+        return Item("analysis", facts, "Give your view on what we have just seen.",
+                    t_event=(on_air[0], max(0.0, on_air[1] - self.cfg["analysis_span"])))
+
     def _play(self, view: View, on_air: Time) -> Item:
         """A line over the pictures on air: the runtime lends the generator the last `play_span` s of
         frames up to `on_air`, with who each tracked player is as far as known."""
@@ -428,8 +449,10 @@ PLAY_PROMPT = """You are the TV commentator of this football match, speaking liv
 last {span:.0f} seconds of broadcast pictures, in order; tracked players carry a label (P1, P2, ...) and the text
 before the pictures says who each one is, as far as is known. Say what you would say over these pictures right now:
 usually no more than {play_words} words (up to {max_words} for a big moment).
-- Commentate the play: who has the ball, where it goes, the pressure, the build-up, the way live play-by-play sounds
-  ("Kante wins it back... Hazard, running at them."). Short, spoken, present tense.
+- Commentate the play the way British TV commentators do: short, spoken, present tense, and varied in form — sometimes
+  just a name or two ("Kante... Hazard."), a quick reaction ("Good ball!", "Oh, loose from Matic."), a question ("Can
+  Liverpool find a way through here?"), the tempo or the crowd ("Stamford Bridge getting restless."), or what an
+  on-screen graphic shows; not a pass-by-pass list every time.
 - Don't call goals, shots, saves, fouls, cards, offsides, corners or free kicks: those are called separately, once
   they are certain. If the pictures show a stoppage, a close-up, the crowd or a replay, say something that fits,
   from the facts given.
@@ -438,6 +461,25 @@ usually no more than {play_words} words (up to {max_words} for a big moment).
   ("his first goal for the club", "since he joined"). Don't repeat your recent lines or start the same way as them.
 
 Your recent lines:
+{history}
+
+Facts:
+{facts}
+
+Answer with JSON only: {{"line": "...", "tone": "excited" | "lively" | "calm"}} — the tone to say it in."""
+
+
+ANALYSIS_PROMPT = """You are the co-commentator of this football match (a former player, alongside the main commentator),
+speaking live on air in {language}. Below are the last {span:.0f} seconds of broadcast pictures, in order (after a
+goal or a big moment these are usually its replays); tracked players carry a label (P1, P2, ...) and the text before
+the pictures says who each one is, as far as is known. Give your view on what we have just seen: why it happened,
+who did well or badly, how the teams are set up — one or two short, conversational sentences, at most {max_words}
+words, the way a pundit talks ("That's lovely movement from Hazard, he's pulled the full-back all the way out.").
+- Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons.
+- Name a player only when the text identifies him; otherwise say the team. Never say shirt numbers or the labels.
+- Don't call new goals, cards or fouls; don't repeat the recent lines or start the same way as them.
+
+Recent lines on air:
 {history}
 
 Facts:
@@ -463,14 +505,35 @@ class Commentator:
                                         max_words=self.cfg["max_words"], play_words=self.cfg["play_words"],
                                         history=recent, facts=facts)
             result = self.generate([prompt, frames.text, *frames.images])
+        elif item.kind == "analysis" and frames is not None:
+            prompt = ANALYSIS_PROMPT.format(language=self.cfg["language"], span=self.cfg["analysis_span"],
+                                            max_words=self.cfg["max_words"], history=recent, facts=facts)
+            result = self.generate([prompt, frames.text, *frames.images])
         else:
             prompt = PROMPT.format(max_words=self.cfg["max_words"], language=self.cfg["language"], rule=item.rule,
                                    kind=item.kind, facts=facts, history=recent)
             result = self.generate([prompt])
         answer = parse_json(result.text)
         text = str(answer.get("line") or result.text).strip()
+        latency = result.latency
+        if BACKGROUND.search(text):
+            # Background of the model's own (a record, a career, a season): it may be wrong, or give
+            # away what happens later. Asked once more, told what to leave out.
+            again = self.generate([*([prompt] if item.kind not in ("play", "analysis") or frames is None
+                                     else [prompt, frames.text, *frames.images]),
+                                   f'Your line was: "{text}". It uses background that neither the pictures nor the facts give '
+                                   "(records, careers, seasons, clubs' history). Say it again without it."])
+            latency += again.latency
+            answer = parse_json(again.text)
+            text = str(answer.get("line") or text).strip()
         tone = answer.get("tone") if answer.get("tone") in ("excited", "lively", "calm") else "lively"
-        return text, tone, result.latency, result.call_id
+        return text, tone, latency, result.call_id
+
+
+# Phrases that only background knowledge could supply: a player's record or career, a club's season or history.
+BACKGROUND = re.compile(r"\b(first|second|third|\d+(st|nd|rd|th))\b[^.!?]{0,30}\b(goal|appearance|start)s?\b[^.!?]{0,30}"
+                        r"\b(for|in|since|of)\b|\bfor the club\b|\bthis season\b|\blast season\b|\bcareer\b|"
+                        r"\bsince (he|joining|arriving|signing)\b|\bin (his|their) (time|history)\b", re.I)
 
 
 def speaking_time(text: str, words_per_second: float) -> float:

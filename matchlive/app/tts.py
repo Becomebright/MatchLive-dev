@@ -1,5 +1,5 @@
-"""The commentator's voice (DESIGN.md §6.9): each line spoken by a text-to-speech model, in the tone
-the line was written for.
+"""The commentators' voices (DESIGN.md §6.9): each line spoken by a text-to-speech model, in the tone
+the line was written for — the main commentator in one voice, the co-commentator in another.
 
 One model call per line through the runtime's API client (speech(), cached as MP3). The tone
 ("excited", "lively", "calm", chosen by the line's generator) picks the delivery instruction the
@@ -30,9 +30,11 @@ class Voice:
         self.cfg = config
         self.speak = speak
 
-    def say(self, text: str, tone: str) -> Utterance:
-        tones = self.cfg["tones"]
-        result = self.speak(text, self.cfg["voice"], tones.get(tone, tones["lively"]), self.cfg["model"])
+    def say(self, text: str, tone: str, analyst: bool = False) -> Utterance:
+        """`analyst`: the co-commentator speaks, in the second voice and manner."""
+        tones = self.cfg["analyst_tones"] if analyst else self.cfg["tones"]
+        voice = self.cfg["analyst_voice"] if analyst else self.cfg["voice"]
+        result = self.speak(text, voice, tones.get(tone, tones["lively"]), self.cfg["model"])
         return Utterance(result.path, audio_duration(result.path), result.latency, result.call_id)
 
 

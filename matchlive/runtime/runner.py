@@ -579,7 +579,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 break
             item = policy.decide(mem.at((half, t)), on_air)
             frames = None
-            if item.kind == "play":
+            if item.kind in ("play", "analysis"):
                 frames = pictures.call((half, t), "get_frames", {"half": half, "start": item.t_event[1], "end": on_air[1]})
                 if not frames.images:          # nothing to look at (e.g. no frames yet)
                     t += cfg["tick"]
@@ -595,14 +595,14 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
 
             def lateness(ready):
                 start = max(ready - delay, ends)
-                if item.t_event and item.kind != "play":
+                if item.t_event and item.kind not in ("play", "analysis"):
                     start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
                 return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
 
             start, late = lateness(t + latency + speak_took)
             if not late:
                 try:
-                    spoken = voice.say(text, tone)
+                    spoken = voice.say(text, tone, analyst=item.kind == "analysis")
                     audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
                     speak_took = tts_latency
                 except NoAPIKey:
