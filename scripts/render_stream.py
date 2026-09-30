@@ -79,7 +79,8 @@ def voice_track(lines: list[dict], start: float, duration: float) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--match", required=True)
-    ap.add_argument("--run", default="full", help="live run whose commentary to use (scripts/run_commentary.py)")
+    ap.add_argument("--run", default="full", help="the live run (scripts/run_live.py --name)")
+    ap.add_argument("--name", default=None, help="the commentary folder (scripts/run_commentary.py --name; default: the run)")
     ap.add_argument("--half", type=int, default=1)
     ap.add_argument("--start", type=float, default=0.0, help="s into the half (default: from kick-off)")
     ap.add_argument("--end", type=float, default=None, help="s into the half (default: the whole half)")
@@ -92,7 +93,8 @@ def main():
     config = load_config(overrides=run_overrides(run_dir) + args.set)
     match = Match(config, args.match)
     cfg, render = config["commentary"], config["render"]
-    lines = [json.loads(l) for l in open(config["paths"]["outputs"] / "commentary" / args.match / args.run / "lines.jsonl")]
+    commentary = args.name or args.run
+    lines = [json.loads(l) for l in open(config["paths"]["outputs"] / "commentary" / args.match / commentary / "lines.jsonl")]
 
     video = match.video_path(args.half)
     length = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
@@ -101,7 +103,7 @@ def main():
     shown = [l for l in lines if l["show"][0] == args.half and l["show"][2] > start and l["show"][1] < end]
 
     name = f"half{args.half}" + (f"_{int(start)}-{int(end)}" if (start, end) != (0.0, length) else "")
-    out_dir = config["paths"]["outputs"] / "stream" / args.match / args.run
+    out_dir = config["paths"]["outputs"] / "stream" / args.match / commentary
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
