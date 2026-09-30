@@ -1,6 +1,8 @@
 """Live commentary (DESIGN.md §6.9): what the policy puts on air follows each entry's status —
-a confirmed event names its player, a pending one only its team, and when something already said
-stops holding (retracted, or a different player), the next line corrects it with the reason.
+a confirmed event names its player, a pending one only its team (and waits a little for its
+confirmation first), a disputed one waits for the verdict — and when something already said stops
+holding (retracted, or a different player), the next line corrects it with the reason. Nothing
+after the moment on air is said; with nothing else to say, the line describes the play.
 
 Each test writes a few ops to a small synthetic memory and asks the policy what to say; no model
 is called (the generator only phrases the material the policy chose).
@@ -19,6 +21,8 @@ PREMATCH = {"teams": {"home": "Homeside", "away": "Awayside"},
             "sides": {1: {"home": "left", "away": "right"}, 2: {"home": "right", "away": "left"}},
             "players": PLAYERS}
 TRACK = (1, 4, 7)
+CONFIG = load_config()["commentary"]
+HOLD = CONFIG["hold"]
 
 
 def T(second):
@@ -36,40 +40,95 @@ def goal(t, **participants):
 
 
 def policy():
-    p = CommentaryPolicy(load_config()["commentary"], PREMATCH, sources={})
-    # The half is already opened and a line was just said, so neither a background line nor a
-    # recap gets in the way.
+    p = CommentaryPolicy(CONFIG, PREMATCH, sources={})
+    # The half is already opened, and a context line was just said.
     p.said(Item("background", [], ""), "Welcome.", T(0))
     return p
 
 
+def ask(p, mem, t, on_air=None):
+    """What the policy says next with memory known at t, for air at `on_air` (default: t)."""
+    return p.decide(mem.at(T(t)), T(on_air if on_air is not None else t))
+
+
 def air(p, mem, t):
-    """Ask the policy at match time t and put its item on air; return the item."""
-    item = p.decide(mem.at(T(t)))
-    if item is not None:
-        p.said(item, f"line about {item.entry}", T(t))
+    item = ask(p, mem, t)
+    p.said(item, f"line about {item.entry}", T(t))
     return item
 
 
-def test_pending_event_is_hedged_and_names_nobody():
-    mem = MatchMemory(PLAYERS)
-    mem.add_entry(T(95), Identity(TRACK, "h1"), seen("vote:h1"))
-    eid = mem.add_entry(T(100), goal(80, player=TRACK), seen("live#1", sufficient=False))
-    item = policy().decide(mem.at(T(100)))
-    assert (item.kind, item.entry, item.status) == ("news", eid, "pending")
-    assert item.named == {}
-    assert not any("Player1" in f for f in item.facts)
-    assert "hedge" in item.rule and "Homeside" in item.facts[0]
+def is_news(item, entry):
+    return item.kind == "news" and item.entry == entry
 
 
 def test_confirmed_event_names_its_player():
     mem = MatchMemory(PLAYERS)
     mem.add_entry(T(95), Identity(TRACK, "h1"), seen("vote:h1"))
     eid = mem.add_entry(T(100), goal(80, player=TRACK), seen("live#1"))
-    item = policy().decide(mem.at(T(100)))
-    assert (item.kind, item.entry, item.status) == ("news", eid, "confirmed")
+    item = ask(policy(), mem, 100)
+    assert is_news(item, eid) and item.status == "confirmed"
     assert item.named == {"player": "h1"}
     assert any("Home Player1" in f for f in item.facts)
+
+
+def test_pending_goal_waits_for_confirmation_then_is_hedged_and_names_nobody():
+    mem = MatchMemory(PLAYERS)
+    mem.add_entry(T(95), Identity(TRACK, "h1"), seen("vote:h1"))
+    eid = mem.add_entry(T(100), goal(80, player=TRACK), seen("live#1", sufficient=False))
+    p = policy()
+    assert not is_news(ask(p, mem, 100 + HOLD - 1), eid)        # still waiting for a second sighting
+    item = ask(p, mem, 100 + HOLD)
+    assert is_news(item, eid) and item.status == "pending"
+    assert item.named == {} and not any("Player1" in f for f in item.facts)
+    assert "hedge" in item.rule and "Homeside" in item.facts[0]
+
+
+def test_disputed_event_waits_for_the_verdict():
+    mem = MatchMemory(PLAYERS)
+    first = mem.add_entry(T(160), goal(150, player="h1"), seen("live#1"))
+    second = mem.add_entry(T(180), goal(175, player="h1"), seen("live#2"))
+    case = mem.open_case(T(180), [first, second], "kickoff_after_goal")
+    p = policy()
+    # Neither goal is said while it is disputed (one of them is most likely a replay).
+    assert not ask(p, mem, 200).kind == "news"
+    # The verdict: the second one was the replay of the first.
+    mem.reject_observation(T(210), "live#2")
+    mem.add_justification(T(210), first, Justification(f"verdict:{case}", "verdict", True))
+    mem.close_case(T(210), case, {"summary": "A replay.", "actions": []})
+    assert is_news(ask(p, mem, 210), first)
+
+
+def test_pending_minor_event_is_said_only_once_confirmed():
+    mem = MatchMemory(PLAYERS)
+    shot = mem.add_entry(T(100), Event("shot", "away", ((1, 90), (1, 100))), seen("live#1", sufficient=False))
+    p = policy()
+    assert not is_news(ask(p, mem, 100 + 2 * HOLD), shot)        # half of these are false
+    mem.add_justification(T(120), shot, seen("replay#1"))
+    assert is_news(ask(p, mem, 120), shot)
+    # A minor event confirmed long after the viewer saw it is stale: it is not news any more.
+    late = mem.add_entry(T(130), Event("corner", "home", ((1, 60), (1, 70))), seen("live#2"))
+    assert not is_news(ask(p, mem, 130), late)
+
+
+def test_nothing_after_the_moment_on_air_is_said():
+    mem = MatchMemory(PLAYERS)
+    eid = mem.add_entry(T(155), goal(150, player="h1"), seen("live#1"))
+    p = policy()
+    # Memory knows of the goal at 160, but the viewer is at 100: no news, and the score is still 0-0.
+    item = ask(p, mem, 160, on_air=100)
+    assert not is_news(item, eid)
+    assert item.kind == "recap" and any("Homeside 0, Awayside 0" in f for f in item.facts)
+    # Once the viewer has seen it, it is news.
+    assert is_news(ask(p, mem, 160, on_air=152), eid)
+
+
+def test_with_nothing_else_to_say_it_describes_the_play():
+    p = policy()
+    mem = MatchMemory(PLAYERS)
+    p.said(Item("recap", [], ""), "Goalless so far.", T(100))       # a context line was just said
+    item = ask(p, mem, 110)
+    assert item.kind == "play"
+    assert item.t_event == T(110 - CONFIG["play_span"])            # the pictures it is written over
 
 
 def test_retracted_fact_is_corrected_with_the_verdict():
@@ -77,22 +136,22 @@ def test_retracted_fact_is_corrected_with_the_verdict():
     first = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1"))
     p = policy()
     assert air(p, mem, 100).entry == first
-    second = mem.add_entry(T(150), goal(130, player="h1"), seen("live#2"))
+    second = mem.add_entry(T(150), goal(140, player="h1"), seen("live#2"))
     assert air(p, mem, 150).entry == second           # aired as fact: a second goal
     # The arbiter finds the second goal was the replay of the first.
     case = mem.open_case(T(160), [first, second], "kickoff_after_goal")
     mem.reject_observation(T(200), "live#2")
     mem.close_case(T(200), case, {"summary": "E6 at 02:10.5 (track 1/4/7) is a replay of the first goal, E5.",
                                   "actions": [{"op": "reject", "observation": "live#2"}]})
-    item = p.decide(mem.at(T(200)))
+    item = ask(p, mem, 200)
     assert (item.kind, item.entry, item.status) == ("correction", second, "retracted")
     reason = next(f for f in item.facts if f.startswith("What turned out"))
     assert "replay of the first goal" in reason
     assert not any(code in reason for code in ("E6", "E5", "02:10", "track"))   # no system codes on air
     assert mem.at(T(200)).score == {"home": 1, "away": 0}
     # Once corrected, it is not corrected again.
-    p.said(item, "Correction: only one goal.", T(200))
-    assert p.decide(mem.at(T(202))) is None
+    p.said(item, "No, only one goal.", T(200))
+    assert ask(p, mem, 202).kind != "correction"
 
 
 def test_player_named_on_air_then_changed_is_corrected():
@@ -104,7 +163,7 @@ def test_player_named_on_air_then_changed_is_corrected():
     # A closer look reads the other number on that track: the scorer was h2.
     mem.reject_observation(T(300), "vote:h1")
     mem.add_entry(T(300), Identity(TRACK, "h2"), Justification("verdict:C9", "verdict", True))
-    item = p.decide(mem.at(T(300)))
+    item = ask(p, mem, 300)
     assert (item.kind, item.entry) == ("correction", eid)
     assert item.named == {"player": "h2"}
     assert any("actually Player2" in f for f in item.facts)
@@ -114,10 +173,10 @@ def test_pending_goal_is_aired_again_once_confirmed():
     mem = MatchMemory(PLAYERS)
     eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
     p = policy()
-    assert air(p, mem, 100).named == {}
-    assert p.decide(mem.at(T(110))) is None            # nothing new
+    assert air(p, mem, 100 + HOLD).named == {}
+    assert ask(p, mem, 100 + HOLD + 2).kind in ("recap", "play")     # nothing new about it
     mem.add_justification(T(140), eid, seen("replay#1"))
-    item = p.decide(mem.at(T(140)))
+    item = ask(p, mem, 140)
     assert (item.kind, item.entry, item.named) == ("confirmation", eid, {"player": "h1"})
 
 
@@ -127,18 +186,20 @@ def test_one_incident_is_aired_once_but_a_card_always_is():
     p = policy()
     assert air(p, mem, 100).entry == foul
     # The free kick after it, and the same foul reported again, only repeat what was said.
-    mem.add_entry(T(130), Event("free_kick", "home", ((1, 115), (1, 125))), seen("live#2"))
-    mem.add_entry(T(131), Event("foul", "away", ((1, 95), (1, 105))), seen("live#3"))
-    assert p.decide(mem.at(T(131))) is None
+    kick = mem.add_entry(T(130), Event("free_kick", "home", ((1, 115), (1, 125))), seen("live#2"))
+    again = mem.add_entry(T(131), Event("foul", "away", ((1, 95), (1, 105))), seen("live#3"))
+    assert ask(p, mem, 131).entry not in (kick, again)
     # A card for the foul is news of its own.
-    card = mem.add_entry(T(140), Event("yellow_card", "away", ((1, 100), (1, 110))), seen("live#4", sufficient=False))
-    assert p.decide(mem.at(T(140))).entry == card
+    card = mem.add_entry(T(140), Event("yellow_card", "away", ((1, 100), (1, 110))), seen("live#4"))
+    assert is_news(ask(p, mem, 140), card)
 
 
-def test_hedged_minor_event_retracted_is_not_worth_a_correction():
+def test_minor_event_before_a_goal_on_air_is_overtaken_by_it():
     mem = MatchMemory(PLAYERS)
-    shot = mem.add_entry(T(100), Event("shot", "away", ((1, 90), (1, 100))), seen("live#1", sufficient=False))
+    g = mem.add_entry(T(170), goal(160, player="h1"), seen("live#1"))
     p = policy()
-    assert air(p, mem, 100).entry == shot
-    mem.reject_observation(T(150), "live#1")
-    assert p.decide(mem.at(T(150))) is None
+    assert is_news(air(p, mem, 170), g)
+    # The free kick the goal came from is confirmed only now: once the goal is called, it is old news.
+    kick = mem.add_entry(T(175), Event("free_kick", "home", ((1, 140), (1, 160))), seen("live#2"))
+    mem.add_justification(T(176), kick, seen("replay#2"))
+    assert not is_news(ask(p, mem, 176), kick)

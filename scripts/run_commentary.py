@@ -2,14 +2,13 @@
 the commentator's voice.
 
     python scripts/run_commentary.py --match "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool" [--run full]
-        [--set api.max_attempts=40 ...]
+        [--name NAME] [--only HALF START END] [--dry] [--set api.max_attempts=40 ...]
 
 Reads the run's memory (scripts/run_live.py, outputs/live/<match>/<run>/) and writes
 outputs/commentary/<match>/<run>/:
   lines.jsonl       one record per line (runtime.runner.run_commentary): text, tone, audio (an MP3 in
                     the speech cache) and its duration, and "show", when it is on air on the half
-                    video (app.commentary.schedule: ready time - output_delay, never before its event
-                    is on screen, never over the previous line);
+                    video (the output runs output_delay s behind the feed);
   half<h>.srt       the lines as subtitles on each half video.
 scripts/render_stream.py then puts them on the video. Every line and its audio is one cached model
 call each, so a re-run replays in seconds.
@@ -20,14 +19,28 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from types import SimpleNamespace
 
 import numpy as np
 
-from matchlive.app.commentary import schedule
 from matchlive.common.api import APIClient
 from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.runtime.runner import run_commentary
+
+
+class DryRun:
+    """Stands in for the API client in a dry run: the line is its material's first fact cut to 12
+    words, said in 4 s of made-up latency; there is no voice, so its speaking time is estimated."""
+
+    def generate(self, parts, json_output=False):
+        body = parts[0].split("Material")[1] if "Material" in parts[0] else parts[0].split("Facts:")[1]
+        facts = body.split("\n- ")[1].split("\n")[0]
+        return SimpleNamespace(text=json.dumps({"line": " ".join(facts.split()[:12]), "tone": "lively"}),
+                               latency=4.0, call_id="dry")
+
+    def speech(self, *args):
+        raise RuntimeError("dry run: no voice")
 
 
 def srt(lines: list[dict], half: int) -> str:
@@ -44,6 +57,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--match", required=True)
     ap.add_argument("--run", default="full", help="live run name (scripts/run_live.py --name)")
+    ap.add_argument("--name", default=None, help="output folder under outputs/commentary/<match>/ (default: the run)")
+    ap.add_argument("--dry", action="store_true",
+                    help="no model call: a stub line (the first fact) with an estimated speaking time, to try policies")
+    ap.add_argument("--only", nargs=3, type=float, metavar=("HALF", "START", "END"),
+                    help="only this stretch of video time (a trial)")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="override a config setting on top of the run's own (e.g. api.max_attempts=40)")
     args = ap.parse_args()
@@ -51,11 +69,13 @@ def main():
     run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
     config = load_config(overrides=run_overrides(run_dir) + args.set)
     match = Match(config, args.match)
-    out_dir = config["paths"]["outputs"] / "commentary" / args.match / args.run
+    out_dir = config["paths"]["outputs"] / "commentary" / args.match / (args.name or args.run)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    lines = run_commentary(config, match, run_dir, APIClient(config["api"], config["paths"]["cache"]))
-    schedule(lines, config["commentary"])
+    client = DryRun() if args.dry else APIClient(config["api"], config["paths"]["cache"])
+    only = (int(args.only[0]), args.only[1], args.only[2]) if args.only else None
+    lines = run_commentary(config, match, run_dir, client, only)
+    (out_dir / "run.json").write_text(json.dumps({"run": args.run, "dry": args.dry, "set": args.set, "only": only}, indent=1))
     with open(out_dir / "lines.jsonl", "w") as f:
         for line in lines:
             f.write(json.dumps(line) + "\n")
@@ -64,8 +84,9 @@ def main():
 
     print(out_dir)
     kinds = Counter(l["kind"] for l in lines)
-    lag = [l["show"][1] - l["t_event"][1] for l in lines if l["t_event"]]
-    live_lag = [l["t_ready"][1] - l["t_event"][1] for l in lines if l["t_event"]]
+    events = [l for l in lines if l["t_event"] and l["kind"] in ("news", "confirmation", "correction")]
+    lag = [l["show"][1] - l["t_event"][1] for l in events]
+    live_lag = [l["t_ready"][1] - l["t_event"][1] for l in events]
     voiced = [l for l in lines if l["audio"]]
     print(f"{len(lines)} lines: {dict(kinds)}; tones {dict(Counter(l['tone'] for l in lines))}; voiced {len(voiced)}; "
           f"generation p50 {np.median([l['latency'] for l in lines]):.1f} s, speech p50 "

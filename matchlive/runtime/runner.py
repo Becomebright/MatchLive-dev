@@ -501,69 +501,133 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     return mem
 
 
-def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client) -> list[dict]:
-    """Live commentary (DESIGN.md §6.9) over a live run (run_live's output in `run_dir`), on the
-    match clock.
+def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
+                   only: tuple[int, float, float] | None = None) -> list[dict]:
+    """Live commentary (DESIGN.md §6.9) over a live run (run_live's output in `run_dir`).
+
+    The broadcast output runs `output_delay` (D) s behind the live feed, and the commentary is laid
+    out on the output's timeline. At match time t on the feed the viewer is at t - D: the policy
+    plans the line that goes on air next — about what the viewer will be watching then — from
+    memory as known at t, i.e. with D s of hindsight on that moment, and says nothing about what the
+    viewer has not seen yet. A play line is written over the frames on air (the last `play_span` s
+    up to it, labelled with who each tracked player is as far as known by t; runtime.qa_tools). The
+    line is generated (one model call through `client`) and voiced (one text-to-speech call); it
+    is ready at t + both latencies and goes on air at ready - D, or when the previous line has
+    ended, and lasts as long as its audio. The next line is planned while this one is being spoken,
+    so that it is ready as this one ends (+ `pause`).
 
     Commentary only reads memory, and memory as known at t is a prefix of the run's op log
     (DESIGN.md §5.4), so driving it from the log after the run gives the lines a live run would
-    have given with the same latencies. Every `tick` s while nobody is speaking, the policy looks
-    at memory as known then; what it picks goes to the generator (one model call through
-    `client`), then to the voice (one text-to-speech call). The line is ready at the decision time
-    + both calls' latencies and keeps the commentator busy for as long as its audio lasts. A
-    generation that fails after its retries loses the line, as it would live; a failed synthesis
-    leaves it a subtitle only.
+    have given with the same latencies. A generation that fails after its retries loses the line,
+    as it would live; a failed synthesis leaves it a subtitle only. `only` = (half, start, end)
+    restricts the commentary to that stretch of video time (a trial).
 
     Returns one record per line: its kind, entry, text and tone, the entry's status and the players
     the line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
-    (t_event), the audio (path, duration), and the calls' ids and latencies.
+    (t_event), when it is on air ("show": half, start, end in video time), the audio (path,
+    duration), and the calls' ids and latencies.
     """
+    import copy
     import json
+    import pickle
+    from collections import deque
 
     from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
     from matchlive.app.tts import Voice
     from matchlive.common.api import NoAPIKey
     from matchlive.events.analyzer import clock
+    from matchlive.runtime.qa_tools import QATools
 
     cfg = config["commentary"]
+    delay = cfg["output_delay"]
     mem = MatchMemory(match.prematch["players"], log_path=run_dir / "ops.jsonl", cascade=config["loop"]["cascade"])
     windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
     sources = {f"obs:{w['call_id']}#{i}": {"window": w["window"], "candidate": c}
                for w in windows for i, c in enumerate(w.get("candidates", []))}
     half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
+    # The frames on air for play lines, labelled as the QA's current view is.
+    perceived = {h: pickle.load(open(run_dir / f"perceived_half{h}.pkl", "rb")) for h in (1, 2)}
+    view_config = copy.deepcopy(config)
+    view_config["qa"]["max_frames"] = cfg["play_frames"]
+    pictures = QATools(view_config, match, mem, perceived, sources)
     policy = CommentaryPolicy(cfg, match.prematch, sources)
     commentator = Commentator(cfg, lambda parts: client.generate(parts, json_output=True))
     voice = Voice(cfg["voice"], client.speech)
     lines: list[dict] = []
     for half in (1, 2):
-        t, free = 0.0, 0.0
-        while t <= half_end[half]:
-            if t >= free:
-                item = policy.decide(mem.at((half, t)))
-                if item is not None:
-                    try:
-                        text, tone, latency, call_id = commentator.line(item, [line["text"] for line in lines])
-                    except NoAPIKey:
-                        raise
-                    except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
-                        print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
-                        t += cfg["tick"]
-                        continue
-                    try:
-                        spoken = voice.say(text, tone)
-                        audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
-                    except NoAPIKey:
-                        raise
-                    except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
+        if only and only[0] != half:
+            continue
+        first, last = (only[1], only[2]) if only else (0.0, half_end[half])
+        ends = first                       # video time the previous line ends (+ pause)
+        # How long a line takes to generate and voice: planned with the median of the last few + a
+        # margin (one slow call must not throw the plan out); a line that is not ready in time is
+        # dropped (before it is voiced, if possible).
+        took = deque([10.0], maxlen=5)
+        speak_took = 1.5
+
+        def expected():
+            return sorted(took)[len(took) // 2] + 2.0
+
+        t = free = first + delay - expected()                    # match time on the feed
+        while t - delay <= last:
+            if t < free:
+                t += cfg["tick"]
+                continue
+            # The moment on air: when this line will be ready — never past the feed (its frames).
+            on_air = (half, min(max(t + expected() - delay, ends), t - 1.0))
+            if on_air[1] > last:
+                break
+            item = policy.decide(mem.at((half, t)), on_air)
+            frames = None
+            if item.kind == "play":
+                frames = pictures.call((half, t), "get_frames", {"half": half, "start": item.t_event[1], "end": on_air[1]})
+                if not frames.images:          # nothing to look at (e.g. no frames yet)
+                    t += cfg["tick"]
+                    continue
+            try:
+                text, tone, latency, call_id = commentator.line(item, [line["text"] for line in lines], frames)
+            except NoAPIKey:
+                raise
+            except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
+                print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
+                t += cfg["tick"]
+                continue
+
+            def lateness(ready):
+                start = max(ready - delay, ends)
+                if item.t_event and item.kind != "play":
+                    start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
+                return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
+
+            start, late = lateness(t + latency + speak_took)
+            if not late:
+                try:
+                    spoken = voice.say(text, tone)
+                    audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
+                    speak_took = tts_latency
+                except NoAPIKey:
+                    raise
+                except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
+                    if "dry run" not in str(e):
                         print(f"{half}H {t:.0f}s no voice: {e}", flush=True)
-                        audio, duration, tts_latency = None, speaking_time(text, cfg["words_per_second"]), 0.0
-                    ready = t + latency + tts_latency
-                    free = ready + duration
-                    policy.said(item, text, (half, ready))
-                    lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
-                                  "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
-                                  "t_event": item.t_event, "facts": item.facts, "call_id": call_id, "latency": latency,
-                                  "audio": audio, "duration": duration, "tts_latency": tts_latency})
-                    print(f"{half}H {clock(ready)} [{item.kind}/{tone}] {text}", flush=True)
+                    audio, duration, tts_latency = None, speaking_time(text, cfg["words_per_second"]), 0.0
+                start, late = lateness(t + latency + tts_latency)
+            took.append(latency + speak_took)
+            if late:
+                # Ready too late for the moment it was written for (a slow call): live, it is dropped.
+                print(f"{half}H {t:.0f}s [{item.kind}] too late by {start - on_air[1]:.0f} s: dropped", flush=True)
+                t += cfg["tick"]
+                continue
+            ready = t + latency + tts_latency
+            policy.said(item, text, (half, start))
+            lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
+                          "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
+                          "t_event": item.t_event, "show": (half, start, start + duration), "facts": item.facts,
+                          "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
+                          "tts_latency": tts_latency})
+            print(f"{half}H {clock(start)} [{item.kind}/{tone}] {text}", flush=True)
+            ends = start + duration + cfg["pause"]
+            # Plan the next line so that it is ready as this one ends.
+            free = max(t + cfg["tick"], ends + delay - expected())
             t += cfg["tick"]
     return lines

@@ -43,9 +43,20 @@ qa:
 
 # Live commentary (DESIGN.md §6.9); lines are generated through the `api` section's model.
 commentary:
-  tick: 2                              # s between the policy's looks at memory while nobody is speaking
-  recent: 120                          # s: an event is news only if it happened at most this long ago
-  recap_after: 120                     # s without a line before a recap
+  tick: 1                              # s of match time between the commentator's looks at memory
+  pause: 3.0                           # s of silence between two lines (a human commentator talks ~55% of the time)
+  late: 4                              # s a play or context line may go on air after the moment it was written for
+  late_event: 30                       # ... a line about an event (news, confirmation, correction)
+  context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
+  play_words: 12                       # a play line is usually this short
+  play_span: 6                         # s of pictures a play line is written over
+  play_frames: 8                       # frames shown for them
+  recent: 120                          # s: a goal, card, penalty or substitution is news if the viewer saw it at most this long ago
+  recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
+  hold: 5                              # s a pending event waits for its confirmation before it may go on air
+  # A pending shot, corner, foul, ... goes on air (naming no one) after the hold. Off: minor events
+  # only once confirmed — half the pending ones are false (dry runs, results §23).
+  pending_minor: false
   echo: 60                             # s: a minor event this close to an aired one it repeats is not news (= consistency.pair_window)
   # News, most important first; the policy airs one line at a time, so the tail is filler.
   announce: [goal, red_card, penalty, yellow_card, substitution, injury, shot, corner, offside, free_kick, foul]

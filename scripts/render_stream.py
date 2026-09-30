@@ -9,7 +9,7 @@ outputs/stream/<match>/<run>/: half<h>[_<start>-<end>].mp4 — or with --hls, an
 (<name>/index.m3u8 and 6-s segments, playable by any HLS player). It is what a viewer of the live
 broadcast would get with the system in the loop: the output runs `commentary.output_delay` s behind
 the feed, so it is laid out on the video's own timeline, each line on air from its scheduled time
-(app.commentary.schedule) for as long as its audio lasts. The broadcast's sound (its own commentary
+(runtime.runner.run_commentary) for as long as its audio lasts. The broadcast's sound (its own commentary
 and the crowd) stays underneath at `render.background_volume`.
 """
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from matchlive.app.commentary import schedule
+
 from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 
@@ -93,7 +93,7 @@ def main():
     match = Match(config, args.match)
     cfg, render = config["commentary"], config["render"]
     lines = [json.loads(l) for l in open(config["paths"]["outputs"] / "commentary" / args.match / args.run / "lines.jsonl")]
-    schedule(lines, cfg)                      # again, so a different output_delay can be tried
+
     video = match.video_path(args.half)
     length = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
                                    str(video)], capture_output=True, text=True, check=True).stdout)

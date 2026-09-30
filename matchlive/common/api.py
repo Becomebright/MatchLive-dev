@@ -123,6 +123,25 @@ class APIClient:
         _write(meta, json.dumps({"latency": latency, "model": model, "endpoint": str(client.base_url)}).encode())
         return SpeechResult(call_id, path, latency, cached=False)
 
+    def transcribe(self, audio: Path, model: str) -> dict:
+        """Speech-to-text of an audio file with segment timestamps ({"text", "segments": [{"start",
+        "end", "text"}]}), cached under the hash of the model and the audio. For evaluation only:
+        the live system never listens to the broadcast (DESIGN.md §11 D1)."""
+        data = audio.read_bytes()
+        call_id = hashlib.sha256(json.dumps({"model": model}).encode() + data).hexdigest()[:16]
+        path = self.speech_dir / "transcripts" / f"{call_id}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+
+        def call(client):
+            r = client.audio.transcriptions.create(model=model, file=(audio.name, data), response_format="verbose_json",
+                                                   timestamp_granularities=["segment"])
+            return {"text": r.text, "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in r.segments or []]}
+
+        out, _, _ = self._call(call)
+        _write(path, json.dumps(out).encode())
+        return out
+
     def _call(self, call):
         """Run `call(sdk client)` against the endpoints: transient errors (overload, timeouts) are
         retried with backoff on the same endpoint; an endpoint out of quota, or failing this request
