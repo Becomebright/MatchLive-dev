@@ -94,7 +94,10 @@ class ConsistencyChecker:
             track_players = mem.track_players()
             old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
             clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
-            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash))
+            # Claims that agree pool their participants: who this sighting saw joins the entry
+            # (DESIGN.md §6.4 step 1), so a player only the second window identified is not lost.
+            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash,
+                                                              () if clash else event.participants))
             if clash:
                 mem.open_case(t_known, [eid, obs_id], "claims_disagree", [obs_id])
             return eid

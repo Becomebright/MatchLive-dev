@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from matchlive.events.analyzer import clock, parse_json
-from matchlive.memory.store import MatchMemory
+from matchlive.memory.store import MatchMemory, resolve_players
 from matchlive.memory.types import Case, Identity, Time
 
 
@@ -130,8 +130,9 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
             (h, lo), (_, hi) = e.t_interval
             spans.append((h, lo, hi))
             who = ", ".join(f"{p.role} = track {track_name(p.track_key) if p.track_key else '-'}"
-                            f" ({_player(p.player_id or track_players.get(p.track_key), prematch)})"
-                            for p in e.participants) or "no participants"
+                            + "".join(f" / {track_name(k)}" for k in p.alternates)
+                            + f" ({_player(pid, prematch)})"
+                            for p, pid in zip(e.participants, resolve_players(e, track_players))) or "no participants"
             lines.append(f"- {m}: {e.type}, team {e.team}, half {h} {clock(lo)}–{clock(hi)} [{mem.status(m)}]; {who}")
         for t, j in mem.justifications[m]:
             state = "rejected" if j.obs_id in mem.rejected else ("sufficient" if j.sufficient else "insufficient")

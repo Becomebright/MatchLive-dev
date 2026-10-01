@@ -75,15 +75,36 @@ class QATools:
 
     # ---- the whole log, for qa.mode dump_log (DESIGN.md §7, v2's baseline) ----
 
-    def dump_log(self, now: Time) -> str:
+    def dump_log(self, now: Time, status: bool = True) -> str:
+        """The squads and every event known by `now`. `status` off drops the confirmed / pending
+        tags: the events baseline reads a run without the consistency check, where every
+        analyzer candidate is its own entry and nothing is pending (results §17)."""
+        lines = [self.squads(), "", "Event log so far:"] + [self._line(r, status) for r in self._events(now)]
+        return "\n".join(lines)
+
+    def squads(self) -> str:
         teams = self.prematch["teams"]
         lines = [f"Squads (number, name, starting XI or substitute):"]
         for side in ("home", "away"):
             lines.append(f"{teams[side]} ({side}): " + ", ".join(
                 self._name(p["hash"]) + ("" if p["starting"] else " (sub)")
                 for p in self.prematch["players"] if p["team_side"] == side))
-        lines += ["", "Event log so far:"] + [self._line(r) for r in self._events(now)]
         return "\n".join(lines)
+
+    # ---- the last seconds of raw video, for the video baseline (results §17) ----
+
+    def raw_view(self, now: Time) -> list[str | bytes]:
+        """The sampled frames of the last qa.current_view seconds up to `now`, as broadcast: no
+        player labels, no identities. ["Frame k (clock)", JPEG, ...]."""
+        half, end = now
+        seconds = sorted(s for s in self.perceived[half] if end - self.cfg["current_view"] <= s <= end)
+        parts: list[str | bytes] = []
+        for k, (second, image) in enumerate(self._read(half, seconds[-self.cfg["max_frames"]:]), start=1):
+            # The size and quality the labelled frames are shown at (events.analyzer.labelled_frames).
+            ok, jpg = cv2.imencode(".jpg", cv2.resize(image, (960, 540), interpolation=cv2.INTER_AREA),
+                                   [cv2.IMWRITE_JPEG_QUALITY, 80])
+            parts += [f"Frame {k} (half {half}, {clock(second)})", jpg.tobytes()]
+        return parts
 
     # ---- memory ----
 
@@ -118,7 +139,7 @@ class QATools:
         replay_only = first in self.sources and self.sources[first]["candidate"]["replay"] and self.replay
         return half, (lo + hi) / 2, not replay_only
 
-    def _line(self, r: dict) -> str:
+    def _line(self, r: dict, status: bool = True) -> str:
         e, teams = r["event"], self.prematch["teams"]
         (_, lo), (_, hi) = e.t_interval
         when = (f"half {r['half']} {clock(r['second'])} ({minute_phrase(r['half'], r['second'])})" if r["exact"]
@@ -126,7 +147,8 @@ class QATools:
         team = f"{teams[e.team]} ({e.team})" if e.team else "team unknown"
         who = "; ".join(f"{p.role}: {self._name(pid) if pid else 'unidentified'}"
                         for p, pid in zip(e.participants, r["players"])) or "no players named"
-        return f"{r['id']} [{r['status']}] {e.type} — {team} — {when} — {who}"
+        tag = f" [{r['status']}]" if status else ""
+        return f"{r['id']}{tag} {e.type} — {team} — {when} — {who}"
 
     def _name(self, pid: str) -> str:
         p = self.players[pid]
@@ -252,22 +274,27 @@ class QATools:
             return Evidence("error: no frames in that span")
         n = self.cfg["max_frames"]
         seconds = [seconds[i] for i in np.linspace(0, len(seconds) - 1, min(n, len(seconds))).round().astype(int)]
-        cap = cv2.VideoCapture(str(self.match.video_path(half)))
-        frames, known = [], {}
+        frames, known = self._read(half, seconds), {}
         track_players = self.mem.at(now).mem.track_players()
-        for s in dict.fromkeys(seconds):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(s * self.video.fps[half])))
-            ok, image = cap.read()
-            if not ok:
-                continue
-            frames.append((s, image))
+        for s, _ in frames:
             tracks, carrier, numbers = perceived[s]
             known[s] = ([self._as_known(half, tr, now, track_players) for tr in tracks], carrier, numbers)
-        cap.release()
         block, parts, _ = labelled_frames(frames, known, self.prematch)
         return Evidence(f"{len(frames)} frames of half {half}, {clock(frames[0][0])}-{clock(frames[-1][0])}; "
                         f"player IDs are local to these frames.\n{block}",
                         [p for p in parts if isinstance(p, bytes)])
+
+    def _read(self, half: int, seconds: list[float]) -> list[tuple[float, np.ndarray]]:
+        """The video frames at `seconds` of `half` (duplicates once; unreadable ones skipped)."""
+        cap = cv2.VideoCapture(str(self.match.video_path(half)))
+        frames = []
+        for s in dict.fromkeys(seconds):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(s * self.video.fps[half])))
+            ok, image = cap.read()
+            if ok:
+                frames.append((s, image))
+        cap.release()
+        return frames
 
     def _as_known(self, half: int, tr: Track, now: Time, track_players: Mapping[tuple, str]) -> Track:
         """A track as known by `now`: memory's confirmed identity, else its latest vote up to now

@@ -348,6 +348,11 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
               f"{'verdict' if decision.verdict else decision.note} ({decision.calls} calls, {decision.latency:.0f}s)",
               flush=True)
         if decision.verdict is None:
+            # No usable answer (malformed JSON, out of rounds or API retries) is a void verdict
+            # too: one more try, told why, once this one's time has passed (DESIGN.md §6.6).
+            if not void:
+                heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "retry",
+                                       (case, opened, decision.note)))
             return
         elapsed = t[1] - opened[1] + decision.latency if t[0] == opened[0] else float("inf")
         if elapsed > config["arbiter"]["deadline"]:
@@ -379,6 +384,11 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         # A void verdict leaves the case open and its members pending for good;
                         # the arbiter gets one more try, told why (DESIGN.md §6.6).
                         arbitrate(mem.cases[record["case"]], when, record["opened"], record["void"])
+                continue
+            if kind == "retry":
+                case, opened, note = payload
+                if case.status == "open":
+                    arbitrate(case, when, opened, note)
                 continue
             checker.tick(mem, when)
             half, r = payload
