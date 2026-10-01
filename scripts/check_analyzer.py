@@ -4,7 +4,7 @@
 
 Writes outputs/check_analyzer/<match>_h<half>_<start>s/: frames.jpg (the labelled frames as
 a contact sheet), prompt.txt (the request's text) and, when the API answers (a cached
-answer, or a live call with the key in the environment), answer.json and the parsed
+answer, or a live call through the endpoint in configs/api.local.yaml), answer.json and the parsed
 candidates on stdout.
 """
 
@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 
 import cv2
 import numpy as np
 
-from matchlive.common.api import APIClient
+from matchlive.common.api import APIClient, NoAPIKey
 from matchlive.common.cache import load_perception
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
@@ -69,10 +68,14 @@ def main():
     print(text.split("Player IDs:")[1])
 
     client = APIClient(config["api"], config["paths"]["cache"])
-    if args.no_call or not os.environ.get(config["api"]["api_key_env"]):
-        print(f"\n(no API call: {'--no-call' if args.no_call else config['api']['api_key_env'] + ' not set'})")
+    if args.no_call:
+        print("\n(no API call: --no-call)")
         return
-    result = client.generate(request.parts, json_output=True)
+    try:
+        result = client.generate(request.parts, json_output=True)
+    except NoAPIKey as e:
+        print(f"\n(no API call: {e})")
+        return
     (out_dir / "answer.json").write_text(result.text)
     print(f"\n{result.model}  latency {result.latency:.1f} s  cached {result.cached}  call {result.call_id}")
     for c in parse_candidates(result.text, request):

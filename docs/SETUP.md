@@ -17,8 +17,8 @@ relative to the repo root; see `CLAUDE.md` for the repo layout and day-to-day co
     supports CUDA 13.
 - **Disk.** About 7 GB for all assets (videos 5.3 GB, models 0.7 GB, caches 0.85 GB), plus
   ~30 MB of outputs per replayed match. The full download took about 9 minutes on a cloud VM.
-- **API key.** Only for new model calls (a run from scratch, a changed setting): a Gemini API key
-  in `GOOGLE_API_KEY` (§2). Replays need none.
+- **API key.** Only for new model calls (a run from scratch, a changed setting): an
+  OpenAI-compatible endpoint and key in `configs/api.local.yaml` (§2). Replays need none.
 
 ## 1. Code
 
@@ -35,7 +35,7 @@ conda create -n matchlive -c conda-forge --override-channels python=3.11 ffmpeg 
 conda activate matchlive
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-python numpy scipy \
-    transformers safetensors google-genai pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
+    transformers safetensors openai pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 ```
@@ -47,10 +47,21 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
   pin: ORT 1.30 loads `libnvinfer.so.10`, so with TensorRT 11 the TensorRT EP fails to load and
   ORT silently falls back to CUDA.
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
-- The LLM API (Gemini, through the `google-genai` SDK) needs `export GOOGLE_API_KEY=...` in
-  your shell profile; the key is never stored in the repo. Cached API responses (`cache/api/`)
-  replay without it; without a key, a request the cache lacks stops the run (`NoAPIKey`) instead
-  of calling the API, so a replay either reproduces the recorded run or fails loudly.
+- The LLM API is reached through OpenAI-compatible endpoints (the `openai` SDK), named in
+  `configs/api.local.yaml`, which is gitignored so the keys never enter the repo. They are used
+  in order; the next takes over when one runs out of quota or keeps failing (`api.switch_after`):
+  ```yaml
+  endpoints:
+    - base_url: https://.../v1
+      api_key: sk-...
+    - base_url: https://.../v1        # backup
+      api_key: sk-...
+  ```
+  The model is `api.model` in `configs/default.yaml` (`gemini-3.8-flash`). Cached API responses
+  (`cache/api/`) replay without the file; without it, a request the cache lacks stops the run
+  (`NoAPIKey`) instead of calling the API, so a replay either reproduces the recorded run or fails
+  loudly. (Runs up to 2026-09-29 called Gemini directly through `google-genai`; the cache is keyed
+  by model and request, not by endpoint, so their answers replay the same.)
 
 ## 3. Model weights, match data and caches (private)
 
