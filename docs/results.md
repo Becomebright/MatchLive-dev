@@ -12,7 +12,7 @@
 
 ## 评测数据与口径
 
-- **SoccerNet-GSR test**：49 段，每段 750 帧（30 秒，25fps，1080p），共 36,750 帧。标注包括每个框的轨迹 ID、角色（球员 / 门将 / 裁判 / 球）、队伍（左 / 右）和号码（只有外场球员有）。
+- **SoccerNet-GSR test**：取自 3 场瑞士超级联赛，49 段，每段 750 帧（30 秒，25fps，1080p），共 36,750 帧。标注包括每个框的轨迹 ID、角色（球员 / 门将 / 裁判 / 球）、队伍（左 / 右）和号码（只有外场球员有）。
   - 除检测 AP 外，其余评测都先把画面和框缩到 720p，和本地比赛录像的分辨率一致。
   - 检测结果在 `outputs/gsr_eval/rfdetr-l_raw.npy` 里缓存一次，后面各项评测共用。
 - **本地比赛录像**：切尔西–曼联（2016-02-07）和切尔西–利物浦（2016-09-16），720p、25fps，没有逐帧标注，只用来做人工检查和测速度。
@@ -23,7 +23,7 @@
     - 2014-2015：2015-02-21 Chelsea 1-1 Burnley；2015-02-21 Swansea 2-1 Manchester United；2015-02-21 Crystal Palace 1-2 Arsenal；2015-02-22 Southampton 0-2 Liverpool；2015-04-11 Burnley 0-1 Arsenal；2015-05-17 Manchester United 1-1 Arsenal
     - 2015-2016：2015-08-08 Chelsea 2-2 Swansea；2015-08-16 Manchester City 3-0 Chelsea；2015-08-23 West Brom 2-3 Chelsea；2015-08-29 Chelsea 1-2 Crystal Palace；2015-08-29 Liverpool 0-3 West Ham；2015-08-29 Manchester City 2-0 Watford；2015-08-30 Swansea 2-1 Manchester United；2015-09-12 Everton 3-1 Chelsea；2015-09-26 Leicester 2-5 Arsenal；2015-11-29 Tottenham 0-0 Chelsea
     - 2016-2017：2016-09-17 Hull City 1-4 Arsenal；2016-10-29 Sunderland 1-4 Arsenal；2017-01-02 Middlesbrough 0-0 Leicester；2017-01-03 Bournemouth 3-3 Arsenal
-  - SoccerNet-GSR 测试集的片段是否出自这 20 场还没核对过；如果有重叠，§5、§7 的号码和身份指标会偏乐观。
+  - SoccerNet-GSR 测试集来自 3 场瑞士超级联赛，和这 20 场没有重叠（用户 2026-10-01 确认），所以 §5、§7 的号码和身份指标不受训练重叠影响。
 
 ---
 
