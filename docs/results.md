@@ -856,3 +856,76 @@ GSR test，COCO AP，置信度 ≥ 0.01，每帧取前 100 个框，TensorRT FP1
   - `half1_930-1060.mp4`：利物浦 Lovren 进球，"Is that in? It looks like Liverpool have scored!" → "Yes, the replay confirms it! It's a goal for Lovren"；
   - `half2_690-800.mp4`：利物浦换人，"looks like a substitution might be on the way" → "Confirmed now. Sturridge makes way, and on comes Origi."；
   - 曼联 `half2_880-1010.mp4`：Lingard 进球。
+
+## 24. 解说接入赛前知识库：v7、v8（`DESIGN.md` §6.8、§6.9）
+
+> 2026-10-01。知识库：`scripts/build_kb.py`（每场比赛文件夹里的 `kb.json`），`Match.prematch["background"]`。解说：`matchlive/app/commentary.py`。输入、模型同 §23。
+
+**知识库**（DESIGN §6.8，2026-09-30 用户同意的方案）
+- **来自 metadata**：两队阵型、球场、主裁判、轮次、日期、球员国籍。
+- **由 `build_kb.py` 构建**，所有来源都冻结在开球之前：
+  - 赛前排名、积分、最近三场联赛战绩、上一次联赛交锋：用 football-data.co.uk 本赛季和上赛季的英超赛果，只取比赛日之前的场次，代码直接算出，不经模型；
+  - 主教练、队长、球队事实和球员事实：取各页面在开球前的最后一个 Wikipedia 版本（球队用本赛季页面，球员用个人页面），由模型摘出，每条附原文引句。引句必须能在原文里找到、事实里的数字必须出现在引句里，否则丢弃。
+- **规模**：
+
+| | 有事实的球员 | 球员事实 | 球队事实 | 主教练 / 队长 | 最晚的来源版本 |
+|---|---|---|---|---|---|
+| 曼联场（开球 16:00Z） | 36/36 | 106 | 11 | Hiddink、van Gaal / Terry、Rooney | 15:55:51Z |
+| 利物浦场（开球 19:00Z） | 35/36（Ejaria 找不到页面） | 102 | 11 | Conte、Klopp / —、Henderson | 18:59:46Z |
+
+- 例：
+  - "Going into this game Chelsea are 13th in the Premier League with 29 points from 24 games"（赛果表）；
+  - "José Mourinho was dismissed in December after the reigning champions lost nine of their opening sixteen league fixtures"（2015–16 切尔西赛季页）；
+  - "David Luiz returned to Chelsea from PSG on 31 August 2016 for a reported fee of £34 million"（个人页）。
+
+**解说怎么用**
+- **开场白**：球场、两队主教练、赛前排名。
+- **局势句**：比赛本身没有新东西可说时，说一条球队的赛前事实（近况、交锋、转会、队长），每条只说一次。
+- **事件句**：点名某个球员时附一条他的事实，还附上国籍。
+- **画面解说**：每 60 秒至多一次，给画面里控球最多的已识别球员一条事实。
+- **嘉宾**：每个半场拿到一次两队阵型。
+- 每条事实只提供一次。素材里给的背景可以说；生成器自带的背景仍然拦截。
+- v7 里画面解说只是"可以融进去"，结果拿到 53 次一次都没用。v8 改为"这一句就说这条背景"。
+
+**一个错误和修复**（v7 第一次运行）
+- 现象：利物浦场上半场第 16 分钟以后没有任何解说。
+- 原因：配音耗时原来按最近一句估计。一次配音调用超时重试，用了约 100 秒；此后每句都被预估为赶不上画面，在配音之前就被丢弃，所以这个估计再也没有被更新，直到半场结束。
+- 修复：配音耗时改为最近 5 次的中位数，和生成耗时一样；错过时机的局势句和开场白按"已说过"处理，不再每秒重试同一个（命中缓存、同样迟到的）调用。
+- 检查过 v4、v6，都没有空档；v7 用修复后的代码两场重跑（原日志存为 `*_v7_stalled.log`）。
+
+**结果**（两场全场，口径同 §23）
+
+| | v6 | v7 | v8 | 真人 |
+|---|---|---|---|---|
+| 行数 | 1,537 | 1,514 | 1,487 | — |
+| 播出的事件句里错的 | 14.1%（11/78） | 13.3%（10/75） | 13.0%（10/77） | — |
+| 保留语气说出里错的 | 5.3% | 5.9% | 5.6% | — |
+| 说到的进球 / 牌 / 换人 | 20/22 | 19/22 | 19/22 | — |
+| 说到的其他真实事件 | 22.8% | 23.6% | 24.4% | — |
+| 拿到赛前背景的行 / 用上的 | — | 131 / 38 | 121 / 111 | — |
+| 点名不在素材里的行 | 1.0% | 1.1% | 1.5% | — |
+| 开口时间占比 | 61.3% | 62.4% | 62.1% | 62.5% |
+| 词 / 分钟 | 93.4 | 94.0 | 92.3 | 95.7 |
+| distinct-2 | 0.49 | 0.51 | **0.53** | 0.63 |
+| 和前十句同样开头 | 0.9% | 0.8% | 0.7% | 4.0% |
+| 盲评：胜过真人 / 认出机器 | 0.82 / 0.65 | 0.80 / 0.60 | 0.75 / 0.59 | — |
+| 盲评：对 v6 | — | 0.50 | 0.51 | — |
+| 盲评：v8 对 v7 | — | — | 0.55 | — |
+
+- **"用上"的判定**：这一行里出现了背景事实中的一个词（名字、数字等），而这一行的其余素材里没有这个词。这是保守估计，比如开场白把 "2nd" 说成 "second-placed" 就不算。
+  - v7 用上的主要是局势句（21/21）和事件句；画面解说 0/53，嘉宾 3/37。
+  - v8 画面解说 46/46，嘉宾 39/40。
+- **v8 例句**：
+  - "Willian — thirty-two million from Anzhi back in 2013 — drives at Liverpool."
+  - "Oscar, nineteen million from Internacional back in 2012, turns into space."
+  - "Lingard joined Manchester United's academy at seven, and you really see that work rate tracking back."
+  - 局势句："Remember, José Mourinho was dismissed in December after the reigning champions lost nine of their opening sixteen fixtures."
+  - 开场白："Guus Hiddink's Chelsea host Louis van Gaal's Manchester United—thirteenth against fifth."
+- **事实性不受影响**：错误事件句 13–14%，各版本之间的差别都在一两句以内。
+- **词汇多样性**：distinct-2 从 0.49 升到 0.53，和真人的差距从 0.14 缩到 0.10。
+- **盲评看不出区别**：v7、v8 对 v6 都在 0.50 左右。每次比较 40 个窗口，标准误约 0.08，所以 0.55 也不显著。认出机器率从 0.65 降到 0.59，同样在误差范围内。背景句大约一分钟一条，60 秒的窗口里通常只有一条，裁判的理由也很少提到它。
+- **点名不在素材里**：多出的几行仍然大多读自画面（换人牌、球员特写、字幕条）。有一句 "A booking for Willian" 疑似画面解说越界报了黄牌，没有抽帧核实。
+- **还没做**：两个 `kb.json` 还没传到 HF 资产库。这台机器的 token 没有写权限，需要用户用 `hf upload Becomebright/MatchLive-assets <path> <path> --repo-type dataset` 上传（路径见 `docs/SETUP.md` §3 的表）。
+- **输出**：
+  - `outputs/stream/<match>/v7/`：四个半场，外加两段示例：利物浦场 `half1_0-140.mp4`（开场白和 "against his former club"），曼联场 `half1_540-620.mp4`（穆里尼奥下课那句）；
+  - `outputs/stream/<利物浦场>/v8/half1_0-300.mp4`：画面解说里的背景句。
