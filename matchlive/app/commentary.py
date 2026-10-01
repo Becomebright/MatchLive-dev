@@ -13,7 +13,8 @@ over memory — no model call — and picks, for the next line, in order:
                    what was said of it carries over to the new entry;
   2. confirmation  a goal, card, substitution or penalty aired while pending is now confirmed, or
                    its player has since been identified;
-  3. background    the first line of each half: the teams, the score, pre-match facts;
+  3. background    the first line of each half: the teams, the score, pre-match facts (the venue,
+                   the managers, where each side stands going in);
   4. news          the most important event the viewer has seen in the last `recent` s that has not
                    been aired — except a minor one that only echoes an event aired within `echo` s
                    (the same kind by the same side, or the other half of one incident: a goal and
@@ -24,7 +25,8 @@ over memory — no model call — and picks, for the next line, in order:
                    so it is most often an event already called, or none);
   5. analysis      the co-commentator's view, right after a goal, card or change has been called;
   6. context       every `context_every` s: one angle on how the match stands (score, counts,
-                   who has the pressure, bookings, the busiest player) that has something new;
+                   who has the pressure, bookings, the busiest player) that has something new —
+                   or, when the match has nothing new, a pre-match fact about a side;
   7. analysis      every `analysis_every` s, the co-commentator's view of the play;
   8. play          otherwise, the play on screen, written over the frames on air (the generator
                    is told not to call events: those come from memory, once certain).
@@ -32,6 +34,9 @@ Wording follows each event's status (DESIGN.md §6.9): a confirmed event names i
 memory has identified); a pending one names only the team — and a pending goal, card, penalty or
 substitution is also hedged ("looks like ..."). What was said about each entry is kept, so a later
 change of status or player is noticed and aired.
+Pre-match background (Match.prematch["background"], DESIGN.md §6.8) is the only background a line
+may use: a player's facts come with the first lines that name him, or with the pictures that show
+him (one fact every `background_every` s at most), and each fact is offered once.
 
 The generator makes one cached model call per line from the material alone (facts, the wording
 rule, the last lines said; the frames for a play line) and may not add names or facts. It holds no
@@ -126,6 +131,9 @@ class CommentaryPolicy:
         self.last_big: Time | None = None        # when the last goal, card, penalty or change aired happened
         self.big_since_analysis = False          # ... and the co-commentator has not spoken since
         self.last_analysis: Time | None = None   # video time of the co-commentator's last line
+        self.bg = prematch.get("background") or {}   # pre-match background (DESIGN.md §6.8)
+        self.offered: set[str] = set()           # background facts already given to a line (each once)
+        self.last_bg: Time | None = None         # video time a fact was last given over the pictures
 
     # ---- deciding ----
 
@@ -212,6 +220,8 @@ class CommentaryPolicy:
             self.last_context = on_air
         if item.angle is not None:
             self.context_said[item.angle[0]] = (item.angle[1], on_air[1])
+            if item.angle[0].startswith("background:"):
+                self.offered.add(item.angle[0].removeprefix("background:"))
         if item.kind == "analysis":
             self.last_analysis, self.big_since_analysis = on_air, False
         if item.entry is not None:
@@ -342,9 +352,17 @@ class CommentaryPolicy:
                     fronts.append(f"{' and '.join(forwards)} for {teams[side]}")
             if fronts:
                 facts.append("Up front: " + "; ".join(fronts) + ".")
+            if self.bg.get("venue"):
+                facts.append(f"Venue: {self.bg['venue']}.")
+            for side in ("home", "away"):
+                bg = self.bg.get("teams", {}).get(side, {})
+                if bg.get("manager"):
+                    facts.append(f"{teams[side]}'s manager: {bg['manager']}.")
+                facts += [f"Background: {f}" for f in self._take(bg.get("facts", [])[:1])]
         else:
             facts.append(self._score(view))
-        return Item("background", facts, "Welcome the viewers and open the half in one or two short spoken sentences.",
+        return Item("background", facts, "Welcome the viewers and open the half in two or three short spoken sentences"
+                                         + (": where we are, who manages the sides and how they come into it." if half == 1 else "."),
                     t_event=None)
 
     def _recap(self, view: View) -> Item | None:
@@ -380,18 +398,30 @@ class CommentaryPolicy:
         # What is new: an angle never said, or said with another value, or not said for `context_stale` s.
         fresh = [a for a in angles if a[0] not in self.context_said or self.context_said[a[0]][0] != a[1]
                  or now - self.context_said[a[0]][1] >= self.cfg["context_stale"]]
+        # When the match has nothing new: a pre-match fact about a side (each once).
+        if not fresh:
+            for side in ("home", "away"):
+                bg = self.bg.get("teams", {}).get(side, {})
+                facts = bg.get("facts", []) + ([f"{teams[side]}'s captain: {bg['captain']}."] if bg.get("captain") else [])
+                fresh += [(f"background:{f}", None, f"Background: {f}") for f in facts if f not in self.offered]
+            fresh = fresh[:1] if fresh and fresh[0][0].startswith("background:") else fresh
         if not fresh:
             return None
         # Take turns: the angle said longest ago (never said first).
         angle, value, fact = min(fresh, key=lambda a: self.context_said.get(a[0], (None, -1.0))[1])
         facts = [f"Time: {self._clock(half, now)}.", fact]
-        return Item("recap", facts, "Work this into a natural remark on how the match stands; don't list numbers.",
-                    t_event=None, angle=(angle, value))
+        rule = ("Work this pre-match background into one natural spoken remark." if angle.startswith("background:")
+                else "Work this into a natural remark on how the match stands; don't list numbers.")
+        return Item("recap", facts, rule, t_event=None, angle=(angle, value))
 
     def _analysis(self, view: View, on_air: Time) -> Item:
         """The co-commentator's view, written over the last `analysis_span` s of pictures (after a
         goal, card or change: the replays of it)."""
         facts = [f"Time: {self._clock(*on_air)}.", self._score(view)]
+        shapes = self.bg.get("formations")
+        if shapes and self._take([f"formations:{on_air[0]}"]):
+            teams = self.prematch["teams"]
+            facts.append(f"Background: the line-ups — {teams['home']} {shapes['home']}, {teams['away']} {shapes['away']}.")
         return Item("analysis", facts, "Give your view on what we have just seen.",
                     t_event=(on_air[0], max(0.0, on_air[1] - self.cfg["analysis_span"])))
 
@@ -464,11 +494,43 @@ class CommentaryPolicy:
         if brief:
             return f"{p['short_name']} ({team})"
         role = p["position"] or ("substitute" if not p["starting"] else "player")
-        out = f"{p['short_name']} (full name {p['long_name']}; {team} {role})"
+        country = self.bg.get("nationality", {}).get(pid)
+        out = f"{p['short_name']} (full name {p['long_name']}; {team} {role}" + (f", from {country})" if country else ")")
         n = view.player_stats.get(pid, {}).get(ty, 0) if ty else 0
         if n >= 2:
             out += f"; his {_ordinal(n)} {EVENT_WORDS[ty]} of the match"
+        for fact in self._take(self.bg.get("players", {}).get(pid, [])):
+            out += f"; background you may use: {fact}"
         return out
+
+    def on_screen(self, pictures: str, on_air: Time) -> list[str]:
+        """Background on a player the pictures identify (in their who-is-who text), for a play or
+        co-commentator line — the one on the ball most, if he has a fact not yet given: one fact,
+        at most every `background_every` s."""
+        if self.last_bg is not None and self.last_bg[0] == on_air[0] \
+                and on_air[1] - self.last_bg[1] < self.cfg["background_every"]:
+            return []
+        # Who is who ("P3: Chelsea (home), #21 Matic"), and who is nearest the ball in each frame
+        # ("Nearest to the ball (...): 1:P3 2:P3 3:- ..."): the player on the ball most, first.
+        local = {}
+        for line in pictures.splitlines():
+            for p in self.prematch["players"]:
+                if line.startswith("P") and f"#{p['jersey_number']} {p['short_name']}" in line:
+                    local[line.split(":")[0]] = p
+        ball = next((line for line in pictures.splitlines() if line.startswith("Nearest to the ball")), "")
+        carried = Counter(re.findall(r"\d+:(P\d+)", ball))
+        shown = sorted(local, key=lambda pid: (-carried[pid], int(pid[1:])))
+        for p in (local[pid] for pid in shown):
+            for fact in self._take(self.bg.get("players", {}).get(p["hash"], [])):
+                self.last_bg = on_air
+                return [f"Background you may use on {p['short_name']}: {fact}"]
+        return []
+
+    def _take(self, facts: Sequence[str], n: int = 1) -> list[str]:
+        """The first `n` facts not yet given to a line, now marked as given."""
+        new = [f for f in facts if f not in self.offered][:n]
+        self.offered.update(new)
+        return new
 
     @staticmethod
     def _clock(half: int, second: float) -> str:
@@ -500,7 +562,8 @@ what you would actually say into the microphone now, at most {max_words} words.
 - Call players by the name given first; never say shirt numbers, positions in brackets, clock times to the second,
   or anything about how you know it ("sightings", "the system", "the arbiter", "memory").
 - Use only what the material gives: never add a player, a number or a detail that is not in it, and no background
-  of your own about players, clubs or seasons (it may be wrong, or tell what happens later).
+  of your own about players, clubs or seasons (it may be wrong, or tell what happens later). Background given in the
+  material is pre-match knowledge: use it when it fits, in your own words.
 - {rule}
 - Don't repeat your recent lines or start the same way as them.
 
@@ -526,7 +589,9 @@ usually no more than {play_words} words (up to {max_words} for a big moment).
   from the facts given.
 - Name a player only when the text identifies him; otherwise say the team. Never say shirt numbers or the labels.
 - Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons
-  ("his first goal for the club", "since he joined"). Don't repeat your recent lines or start the same way as them.
+  ("his first goal for the club", "since he joined"). Background given in the facts is pre-match knowledge: weave
+  it into the play as a commentator would ("Kante, the summer signing from Leicester, wins it back."). Don't repeat
+  your recent lines or start the same way as them.
 
 Your recent lines:
 {history}
@@ -543,7 +608,9 @@ goal or a big moment these are usually its replays); tracked players carry a lab
 the pictures says who each one is, as far as is known. Give your view on what we have just seen: why it happened,
 who did well or badly, how the teams are set up — one or two short, conversational sentences, at most {max_words}
 words, the way a pundit talks ("That's lovely movement from Hazard, he's pulled the full-back all the way out.").
-- Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons.
+- Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons;
+  background given in the facts (the line-ups, a player's past) is pre-match knowledge: draw on it when it explains
+  what we saw.
 - Name a player only when the text identifies him; otherwise say the team. Never say shirt numbers or the labels.
 - Don't call new goals, cards or fouls; don't repeat the recent lines or start the same way as them.
 
@@ -584,7 +651,7 @@ class Commentator:
         answer = parse_json(result.text)
         text = str(answer.get("line") or result.text).strip()
         latency = result.latency
-        if BACKGROUND.search(text):
+        if BACKGROUND.search(text) and "background" not in facts.lower():
             # Background of the model's own (a record, a career, a season): it may be wrong, or give
             # away what happens later. Asked once more, told what to leave out.
             again = self.generate([*([prompt] if item.kind not in ("play", "analysis") or frames is None

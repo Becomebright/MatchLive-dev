@@ -83,6 +83,7 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 |---|---|---|
 | `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (3 matches) | 5.3G | every pipeline run (`paths.dataset`) |
 | `dataset/organized_data/.../2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-caption_with_gt.json` | 58K | ground-truth events (SoccerNet-Caption format, `gt_gameTime` = corrected time) |
+| `dataset/organized_data/.../<match>/kb.json` (2 benchmark matches) | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
 | `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark |
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | jersey reader (`perception.jersey.model`) |

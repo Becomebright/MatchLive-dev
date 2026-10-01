@@ -270,3 +270,39 @@ def test_an_entry_a_verdict_replaced_with_a_fuller_one_is_confirmed_not_correcte
     item = ask(p, mem, 150)
     assert (item.kind, item.entry) == ("confirmation", new)
     assert item.named == {"in": "h4", "out": "h1"}
+
+
+# Pre-match background (Match.prematch["background"], DESIGN.md §6.8).
+BACKGROUND = {"teams": {"home": {"manager": "Home Manager", "captain": None, "facts": ["Homeside are 2nd going in."]},
+                        "away": {"manager": None, "captain": None, "facts": []}},
+              "players": {"h1": ["He joined from Elsewhere in 2014.", "He has 20 caps."]}}
+
+
+def policy_with_background():
+    p = CommentaryPolicy(CONFIG, PREMATCH | {"background": BACKGROUND}, sources={})
+    p.said(Item("background", [], ""), "Welcome.", T(0))
+    return p
+
+
+def test_a_players_pre_match_facts_are_given_once_each():
+    mem = MatchMemory(PLAYERS)
+    p = policy_with_background()
+    mem.add_entry(T(100), goal(80, player="h1"), seen("live#1"))
+    facts = "\n".join(air(p, mem, 100).facts)
+    assert "joined from Elsewhere" in facts and "20 caps" not in facts
+    p.said(Item("analysis", [], ""), "Well taken.", T(110))
+    second = mem.add_entry(T(300), goal(280, player="h1"), seen("live#2"))
+    item = air(p, mem, 300)
+    assert item.entry == second
+    facts = "\n".join(item.facts)
+    assert "20 caps" in facts and "joined from Elsewhere" not in facts
+
+
+def test_pre_match_facts_fill_a_context_line_when_the_match_has_nothing_new():
+    mem = MatchMemory(PLAYERS)
+    p = policy_with_background()
+    every = CONFIG["context_every"]
+    assert air(p, mem, every).kind == "recap"                      # the score, first
+    item = air(p, mem, 2 * every)                                  # nothing new in the match
+    assert item.kind == "recap" and any("2nd going in" in f for f in item.facts)
+    assert ask(p, mem, 3 * every).kind != "recap"                  # said once

@@ -584,6 +584,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 if not frames.images:          # nothing to look at (e.g. no frames yet)
                     t += cfg["tick"]
                     continue
+                # Pre-match background on a player the pictures identify, now and then.
+                item.facts += policy.on_screen(frames.text, on_air)
             try:
                 text, tone, latency, call_id = commentator.line(item, [line["text"] for line in lines], frames)
             except NoAPIKey:
