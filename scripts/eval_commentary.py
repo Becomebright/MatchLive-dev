@@ -116,7 +116,7 @@ def background_use(line: dict) -> tuple[bool, bool]:
     def words(t):           # accents dropped, so "Matić" and "Matic" are one word
         t = unicodedata.normalize("NFKD", t.lower()).encode("ascii", "ignore").decode()
         return {w for w in re.findall(r"\w+", t) if len(w) >= 4 or w.isdigit()}
-    background = words(" ".join(re.split(r"(?i)background(?: you may use)?(?: on [^:]+)?:", f, maxsplit=1)[-1] for f in given))
+    background = words(" ".join(re.split(r"(?i)background[^:]*:", f, maxsplit=1)[-1] for f in given))
     rest = words(" ".join(f for f in line["facts"] if f not in given) + " " + (line.get("pictures") or ""))
     return True, bool((background - rest) & words(line["text"]))
 

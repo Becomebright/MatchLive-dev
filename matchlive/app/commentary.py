@@ -529,7 +529,7 @@ class CommentaryPolicy:
         for p in (local[pid] for pid in shown):
             for fact in self._take(self.bg.get("players", {}).get(p["hash"], [])):
                 self.last_bg = on_air
-                return [f"Background you may use on {p['short_name']}: {fact}"]
+                return [f"Background to say in this line, on {p['short_name']}: {fact}"]
         return []
 
     def _take(self, facts: Sequence[str], n: int = 1) -> list[str]:
@@ -595,9 +595,10 @@ usually no more than {play_words} words (up to {max_words} for a big moment).
   from the facts given.
 - Name a player only when the text identifies him; otherwise say the team. Never say shirt numbers or the labels.
 - Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons
-  ("his first goal for the club", "since he joined"). Background given in the facts is pre-match knowledge: weave
-  it into the play as a commentator would ("Kante, the summer signing from Leicester, wins it back."). Don't repeat
-  your recent lines or start the same way as them.
+  ("his first goal for the club", "since he joined"). Don't repeat your recent lines or start the same way as them.
+- If the facts give background to say in this line (pre-match knowledge about a player on screen), this line is
+  about him: say it now, briefly and in your own words, tied to what he is doing ("Kante — thirty-two million from
+  Leicester in the summer — and he's won it back again.").
 
 Your recent lines:
 {history}
