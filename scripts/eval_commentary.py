@@ -19,6 +19,9 @@ The generated text itself is checked for names the material did not give: a rost
 in a line but in none of its facts (nor in who-is-who of the frames a play line is written over)
 is the generator adding a name.
 
+Pre-match background (DESIGN.md §6.8): how many lines were given a fact, and how many used it (a
+word of the fact, such as a name or a number, that the rest of the line's material does not have).
+
 Coverage: the visible true events some line spoke of (news or a confirmation). Style, next to the
 broadcast's own commentary (scripts/transcribe_broadcast.py): the share of match time spoken, words
 per minute of match, lines per minute, words per line, lexical variety (distinct word pairs) and
@@ -29,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import unicodedata
 from collections import Counter
 
 import numpy as np
@@ -100,6 +105,20 @@ def blind_claims(ops, roster, cascade, announce, true_of, truth) -> Counter:
         named = {p.role: pid for p, pid in zip(e.participants, mem.event_players(eid)) if pid and p.role in ROLE_WORDS}
         _names(c, named, truth[true_of[eid]] if right else None, e)
     return c
+
+
+def background_use(line: dict) -> tuple[bool, bool]:
+    """(given pre-match background, used it): the line counts as using it when it has a word of the
+    background (a name, a number, ...) that the rest of its material does not have."""
+    given = [f for f in line["facts"] if "background" in f.lower()]
+    if not given:
+        return False, False
+    def words(t):           # accents dropped, so "Matić" and "Matic" are one word
+        t = unicodedata.normalize("NFKD", t.lower()).encode("ascii", "ignore").decode()
+        return {w for w in re.findall(r"\w+", t) if len(w) >= 4 or w.isdigit()}
+    background = words(" ".join(re.split(r"(?i)background(?: you may use)?(?: on [^:]+)?:", f, maxsplit=1)[-1] for f in given))
+    rest = words(" ".join(f for f in line["facts"] if f not in given) + " " + (line.get("pictures") or ""))
+    return True, bool((background - rest) & words(line["text"]))
 
 
 def style(texts: list[str], speech: float, seconds: float) -> dict:
@@ -176,6 +195,9 @@ def main():
                 extra = set(_mentions(line["text"], match.prematch["players"])) \
                     - set(_mentions("\n".join(line["facts"] + [line.get("pictures") or ""]), match.prematch["players"]))
                 text["added_names"] += bool(extra)
+                offered, used = background_use(line)
+                text["background_offered"] += offered
+                text["background_used"] += used
                 if line["entry"] in true_of and line["kind"] == "news":
                     g = truth[true_of[line["entry"]]]
                     lags.append(line["t_ready"][1] - g["time"][1] if line["t_ready"][0] == g["time"][0] else np.nan)
@@ -198,7 +220,8 @@ def main():
 
     for run, (ours, blind, text, lags) in rows.items():
         print(f"\n== {run}: {text['lines']} lines; lines naming a player the material did not give: "
-              f"{text['added_names']} ({pct(text['added_names'], text['lines']).strip()})")
+              f"{text['added_names']} ({pct(text['added_names'], text['lines']).strip()}); pre-match background "
+              f"given to {text['background_offered']} lines, used in {text['background_used']}")
         print(f"{'':28s} {'claims as fact':>15s} {'false':>7s} {'goals/cards/subs as fact':>25s} {'false':>7s} "
               f"{'hedged':>7s} {'false':>7s} {'names checked':>14s} {'wrong':>7s}")
         for label, c in (("status-aware (ours)", ours), ("status-blind (v2-like)", blind)):
