@@ -229,9 +229,15 @@ class CommentaryPolicy:
         if item.kind in ("news", "confirmation") and item.event_type in self.cfg["confirm"]:
             self.last_big, self.big_since_analysis = item.t_event, True
 
-    def dropped(self, item: Item) -> None:
-        """`item` could not go on air in time: its moment has passed, so it is not picked again — news
-        is skipped, and a confirmation or correction takes what memory now holds as said."""
+    def dropped(self, item: Item, on_air: Time) -> None:
+        """`item` could not go on air in time (for the moment `on_air`): its moment has passed, so it
+        is not picked again — news is skipped, a confirmation or correction takes what memory now
+        holds as said, and a context line or half opener waits its turn as if said (asked again at
+        once it would be the same, cached, call — and as late)."""
+        if item.kind == "recap":
+            self.last_context = on_air
+        elif item.kind == "background":
+            self.halves_opened.add(on_air[0])
         if item.entry is None:
             return
         if item.kind == "news":

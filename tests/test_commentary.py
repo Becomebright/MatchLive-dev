@@ -214,8 +214,18 @@ def test_a_line_that_missed_its_moment_is_not_picked_again():
     mem.add_justification(T(140), eid, seen("replay#1"))
     item = ask(p, mem, 140)
     assert (item.kind, item.entry) == ("confirmation", eid)
-    p.dropped(item)                                                # not ready in time for its moment
+    p.dropped(item, T(140))                                        # not ready in time for its moment
     assert ask(p, mem, 141).entry != eid
+
+
+def test_a_context_line_that_missed_its_moment_waits_its_turn():
+    mem = MatchMemory(PLAYERS)
+    p = policy()
+    every = CONFIG["context_every"]
+    item = ask(p, mem, every)
+    assert item.kind == "recap"
+    p.dropped(item, T(every))                                      # not ready in time
+    assert ask(p, mem, every + 1).kind != "recap"                  # not asked again at once
 
 
 def test_minor_event_before_a_goal_on_air_is_overtaken_by_it():

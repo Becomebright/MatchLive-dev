@@ -563,7 +563,10 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
         # margin (one slow call must not throw the plan out); a line that is not ready in time is
         # dropped (before it is voiced, if possible).
         took = deque([10.0], maxlen=5)
-        speak_took = 1.5
+        # Voicing is planned the same way, from the last few voiced lines: a line found too late is
+        # dropped before it is voiced, so a single slow voicing taken as the estimate would make
+        # every later line look too late, and never be replaced.
+        spoke = deque([1.5], maxlen=5)
 
         def expected():
             return sorted(took)[len(took) // 2] + 2.0
@@ -601,12 +604,13 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                     start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
                 return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
 
+            speak_took = sorted(spoke)[len(spoke) // 2]
             start, late = lateness(t + latency + speak_took)
             if not late:
                 try:
                     spoken = voice.say(text, tone, analyst=item.kind == "analysis")
                     audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
-                    speak_took = tts_latency
+                    spoke.append(tts_latency)
                 except NoAPIKey:
                     raise
                 except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
@@ -619,7 +623,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 # Ready too late for the moment it was written for (a slow call): live, it is dropped —
                 # and not picked again (its moment has passed).
                 print(f"{half}H {t:.0f}s [{item.kind}] too late by {start - on_air[1]:.0f} s: dropped", flush=True)
-                policy.dropped(item)
+                policy.dropped(item, on_air)
                 t += cfg["tick"]
                 continue
             ready = t + latency + tts_latency
