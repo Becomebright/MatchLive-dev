@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from matchlive.common.config import load_config
+from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.memory.store import MatchMemory
 from matchlive.memory.types import Event
@@ -29,9 +29,9 @@ def main():
     ap.add_argument("--run", default="full")
     args = ap.parse_args()
 
-    config = load_config()
+    run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
+    config = load_config(overrides=run_overrides(run_dir))
     match = Match(config, args.match)
-    run_dir = config["paths"]["outputs"] / "live" / args.match / args.run
     windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
     ok = [w for w in windows if "error" not in w]
     lat = np.array([w["latency"] for w in ok])

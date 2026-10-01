@@ -186,9 +186,11 @@ def parse_json(text: str) -> dict:
     try:
         answer = json.loads(text)
     except json.JSONDecodeError:
-        # Stray text around the object (e.g. a lone closing fence): try the outermost braces.
+        # Stray text after the object (a lone closing fence; some endpoints go on with a second JSON
+        # block, or with tool results the model made up): the first complete object is the answer.
+        start = text.find("{")
         try:
-            answer = json.loads(text[text.find("{"): text.rfind("}") + 1])
+            answer = json.JSONDecoder().raw_decode(text[start:])[0] if start >= 0 else {}
         except json.JSONDecodeError:
             return {}
     return answer if isinstance(answer, dict) else {}

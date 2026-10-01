@@ -8,7 +8,7 @@ outputs/live/<match>/<run>/) knew at that moment: memory as known by then, perce
 to then. The model sees the question and its options and nothing else from the benchmark (its match
 key carries the final score).
 
-Writes outputs/qa/<match>/<run>/<mode>.jsonl, one line per question, and prints accuracy per
+Writes outputs/qa/<match>/<run>/<mode>[_<tag>].jsonl, one line per question, and prints accuracy per
 subcategory with the predicted-letter distribution and the always-"A" baseline (dim1's answers
 lean to A by construction, docs.md §8).
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from matchlive.app.qa import QAAgent, question_text
 from matchlive.common.api import APIClient, NoAPIKey
-from matchlive.common.config import REPO_ROOT, load_config
+from matchlive.common.config import REPO_ROOT, load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.events.analyzer import clock
 from matchlive.memory.store import MatchMemory
@@ -39,7 +39,10 @@ def main():
     ap.add_argument("--run", default="full", help="live run name (scripts/run_live.py --name)")
     ap.add_argument("--mode", default=None,
                     help="tools | dump_log (default: qa.mode) | blind (a sanity check: no memory, no video)")
-    ap.add_argument("--benchmark", default="dataset/streamingqa/part1/benchmark-0926.jsonl")
+    ap.add_argument("--benchmark", default="dataset/streamingqa/part1/benchmark-0926.jsonl",
+                    help="a JSONL of both matches' questions (with match_key), or a folder of per-match files named "
+                         "after the match (a metadata row, then the questions)")
+    ap.add_argument("--tag", default="", help="appended to the result file's name (e.g. the benchmark version)")
     ap.add_argument("--workers", type=int, default=8, help="questions answered at once")
     ap.add_argument("--limit", type=int, default=None, help="only the first N questions (a smoke test)")
     ap.add_argument("--half", type=int, default=None,
@@ -47,10 +50,11 @@ def main():
                          "run is still playing the second (memory as known by a first-half question is complete)")
     args = ap.parse_args()
 
-    config = load_config()
+    run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
+    # The run's own settings (e.g. loop.cascade off decides how memory is read).
+    config = load_config(overrides=run_overrides(run_dir))
     mode = args.mode or config["qa"]["mode"]
     match = Match(config, args.match)
-    run_dir = config["paths"]["outputs"] / "live" / args.match / args.run
     # Read from a copy of the complete lines: the live run may still be appending to the log.
     lines = open(run_dir / "ops.jsonl").read().split("\n")[:-1]
     snapshot = Path(tempfile.mkdtemp()) / "ops.jsonl"
@@ -64,8 +68,13 @@ def main():
     client = APIClient(config["api"], config["paths"]["cache"])
     agent = QAAgent(config["qa"], lambda parts: client.generate(parts, json_output=True))
 
-    rows = [(i, q) for i, q in enumerate(map(json.loads, open(REPO_ROOT / args.benchmark)))
-            if q["match_key"] == match.metadata["match_key"] and args.half in (None, match.match_time(q["timestamp"])[0])][: args.limit]
+    bench = REPO_ROOT / args.benchmark
+    if bench.is_dir():
+        # One file per match, named after it; only its question rows (the first row is match metadata).
+        [bench] = [p for p in bench.glob("*.jsonl") if p.stem.endswith(match.metadata["match_key"])]
+    rows = [(i, q) for i, q in enumerate(map(json.loads, open(bench)))
+            if "question" in q and q.get("match_key", match.metadata["match_key"]) == match.metadata["match_key"]
+            and args.half in (None, match.match_time(q["timestamp"])[0])][: args.limit]
     teams, kits = match.prematch["teams"], match.prematch["jersey_colors"]
     match_text = (f"The match: {teams['home']} (home, {kits['home'][0]} kit) vs {teams['away']} "
                   f"(away, {kits['away'][0]} kit).")
@@ -100,7 +109,8 @@ def main():
                 print(f"{n}/{len(rows)} answered, {time.time() - t0:.0f} s", flush=True)
 
     # A partial run (one half, the first N questions) never overwrites the full result file.
-    name = mode + (f"_half{args.half}" if args.half else "") + (f"_first{args.limit}" if args.limit else "")
+    name = mode + (f"_{args.tag}" if args.tag else "") + (f"_half{args.half}" if args.half else "") \
+        + (f"_first{args.limit}" if args.limit else "")
     out_path = config["paths"]["outputs"] / "qa" / args.match / args.run / f"{name}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
