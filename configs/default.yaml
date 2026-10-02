@@ -41,6 +41,60 @@ qa:
   max_frames: 16                       # frames per get_frames / get_current_view
   current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
 
+# Live commentary (DESIGN.md §6.9); lines are generated through the `api` section's model.
+commentary:
+  tick: 1                              # s of match time between the commentator's looks at memory
+  pause: 2.0                           # s of silence between two lines (the broadcast commentators talk ~62% of the time)
+  late: 4                              # s a play or context line may go on air after the moment it was written for
+  late_event: 30                       # ... a line about an event (news, confirmation, correction)
+  context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
+  context_stale: 600                   # s after which an angle on the match may be said again unchanged
+  background_every: 60                 # s on air at least between two pre-match facts given over the pictures
+  play_words: 12                       # a play line (a burst of short phrases) has at most this many words
+  play_span: 6                         # s of pictures a play line is written over
+  play_frames: 8                       # frames shown for them
+  analysis_every: 30                   # s on air between the co-commentator's views of the play
+  analysis_span: 20                    # s of pictures (spread over play_frames frames) a view is given on
+  recent: 120                          # s: a goal, card, penalty or substitution is news if the viewer saw it at most this long ago
+  recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
+  hold: 5                              # s a pending event waits for its confirmation before it may go on air
+  # A pending shot, corner, foul, ... goes on air (naming no one) after the hold. Off: minor events
+  # only once confirmed — half the pending ones are false (dry runs, results §25).
+  pending_minor: false
+  echo: 60                             # s: a minor event this close to an aired one it repeats is not news (= consistency.pair_window)
+  # News, most important first; the policy airs one line at a time, so the tail is filler.
+  announce: [goal, red_card, penalty, yellow_card, substitution, injury, shot, corner, offside, free_kick, foul]
+  # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
+  # (An event aired as fact is corrected whatever its type.)
+  confirm: [goal, red_card, penalty, yellow_card, substitution]
+  max_words: 20                        # per line: spoken lines are short
+  language: English
+  history: 10                          # the last lines shown to the generator, so it does not repeat itself
+  words_per_second: 2.5                # speaking rate: a line keeps the commentator busy this long
+  # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
+  # 30-90 s memory needs to learn of an event and the generation call. A line is shown with the
+  # video at (ready time - output_delay), but never before the event it speaks of is on screen.
+  output_delay: 60
+  # The commentator's voice (text-to-speech through the api endpoints): the line's generator picks
+  # a tone, which picks the delivery instruction.
+  voice:
+    model: gpt-4o-mini-tts
+    voice: ash
+    tones:
+      excited: "A British football TV commentator calling a big moment live: voice rising, fast, thrilled."
+      lively: "A British football TV commentator following the play live: engaged, brisk, natural."
+      calm: "A British football TV commentator in a lull: relaxed, warm, conversational."
+    # The co-commentator (a former player giving his view), in a second voice.
+    analyst_voice: onyx
+    analyst_tones:
+      excited: "A former footballer as TV co-commentator, thrilled by what he has just seen: animated, quick."
+      lively: "A former footballer as TV co-commentator giving his opinion: relaxed, knowing, conversational."
+      calm: "A former footballer as TV co-commentator, reflective: low-key, measured, conversational."
+
+# The delayed live stream with commentary (scripts/render_stream.py).
+render:
+  background_volume: 0.15              # the broadcast's own sound (its commentary and the crowd), under ours
+  font_size: 30                        # subtitles on the 720p video
 # LLM API (DESIGN.md §2 principle 9), called through an OpenAI-compatible endpoint; responses
 # cached under paths.cache/<cache>, keyed by model + request.
 api:
@@ -52,6 +106,7 @@ api:
   model: gemini-3.8-flash
   cache: api
   switch_after: 5                      # failures of one request in a row before the next endpoint takes over
+  speech_cache: tts                    # text-to-speech audio, under paths.cache
   max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most max_backoff)
   max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
@@ -66,6 +121,9 @@ events:
   # board goes up well before the players swap (30 s apart in Man City - Chelsea). Treatment of
   # an injured player can run over a minute and be reported by several windows.
   live_margin: {default: 10, substitution: 45, injury: 60}
+  # The confidence-gating baseline only (DESIGN.md §10): ask the analyzer for a 0-1 confidence
+  # per event. The method never does (DESIGN.md §4); false keeps the request, and its cache, as is.
+  ask_confidence: false
 
 # Consistency check (DESIGN.md §6.4); seconds are match time within a half.
 consistency:
@@ -77,6 +135,10 @@ consistency:
   # A conflict from per-frame perception goes to the arbiter only once this many independent
   # sources back it (DESIGN.md §6.4): an off-pitch player's number read on k different tracks.
   off_roster_k: 3
+  # The confidence-gating baseline (DESIGN.md §10, MemTX-like), null for the method: a candidate
+  # whose analyzer confidence reaches this is written as confirmed, any other is dropped; no
+  # statuses from justifications, no constraints, no cases.
+  gate: null
 
 # Arbiter (DESIGN.md §6.6); calls go through the `api` section's model.
 arbiter:

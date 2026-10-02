@@ -66,6 +66,37 @@ def test_event_is_confirmed_even_when_its_actor_is_unidentified():
     assert mem.at((1, 160)).score == {"home": 0, "away": 1}
 
 
+def test_player_only_the_second_sighting_identified_joins_the_entry():
+    # Liverpool match, 1H 37:58: one window saw a Chelsea corner with no taker, the next saw
+    # Willian take it. The second sighting supports the entry and brings its taker along.
+    feed = setup(); mem, checker = feed.mem, feed.checker
+    c = feed(130, "corner", "home", 100)
+    assert feed(155, "corner", "home", 104, player=(9, "h2")) == c
+    assert mem.event_players(c) == ("h2",)
+    assert mem.at((1, 160)).player_stats["h2"]["corner"] == 1
+    # Ruling that sighting out takes its taker out again.
+    mem.reject_observation((1, 170), "obs:call2#0")
+    assert mem.event_players(c) == ()
+
+
+def test_unidentified_actor_is_resolved_through_another_sightings_track():
+    # Both windows saw the shooter, on different tracks; only the second track is identified.
+    feed = setup(); mem, checker = feed.mem, feed.checker
+    s = feed(130, "shot", "away", 100, player=(7, None))
+    feed(155, "shot", "away", 104, player=(9, "a1"))
+    assert mem.event_players(s) == ("a1",)
+    assert mem.at((1, 160)).player_stats["a1"]["shot"] == 1
+
+
+def test_one_player_in_two_roles_names_neither():
+    # Manchester United match, 2H 9': one window's substitution had its "in" and "out" tracks
+    # both identified as the same player. Pooled into the entry, that names nobody.
+    feed = setup(); mem, checker = feed.mem, feed.checker
+    s = feed(130, "substitution", "home", 100, **{"in": (7, None)})
+    feed(155, "substitution", "home", 104, **{"in": (8, "h2"), "out": (9, "h2")})
+    assert mem.event_players(s) == (None, None)
+
+
 def test_replay_candidate_matches_the_goal_it_repeats():
     feed = setup(); mem, checker = feed.mem, feed.checker
     g = feed(130, "goal", "home", 100, player=(7, "h1"))

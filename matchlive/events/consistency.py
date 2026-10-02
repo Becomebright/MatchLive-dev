@@ -60,13 +60,19 @@ class ConsistencyChecker:
         self.replay_lookback = config["events"]["replay_lookback"]
         self.enabled = config["loop"]["consistency"]
         self.replay = config["loop"]["replay"]
+        # The confidence-gating baseline (DESIGN.md §10), None for the method.
+        self.gate = self.cfg.get("gate")
 
     # ---- step 1 + 2 for one candidate ----
 
     def propose(self, mem: MatchMemory, t_known: Time, half: int, window: tuple[float, float],
                 cand: Candidate, obs_id: str, players: Sequence[str | None]) -> str:
         """Write one candidate (its participants' voted players in `players`) into memory at
-        knowledge time `t_known`; return the id of the entry it now supports."""
+        knowledge time `t_known`; return the id of the entry it now supports (None if the
+        confidence gate dropped it)."""
+        if self.gate is not None and (cand.confidence is None or cand.confidence < self.gate):
+            # The confidence-gating baseline: an unsure sighting is not written at all.
+            return None
         # Participants' identities first: a track an event references gets an Identity entry,
         # justified by the perception vote (which needs two clear reads, so it suffices).
         for (_, key), player in zip(cand.participants, players):
@@ -87,6 +93,13 @@ class ConsistencyChecker:
 
         events = live_events(mem)
         matches = matching(events, event)
+        if self.gate is not None:
+            # The confidence-gating baseline (MemTX-like): a confident sighting is taken as true
+            # at once — joined to the entry it matches, or a new confirmed entry; no constraints.
+            if matches:
+                mem.add_justification(t_known, matches[0], Justification(obs_id, "observation", True))
+                return matches[0]
+            return mem.add_entry(t_known, event, Justification(obs_id, "observation", True))
         if len(matches) == 1:
             eid = matches[0]
             # Two claims about one event disagree when they name different identified players
@@ -94,7 +107,10 @@ class ConsistencyChecker:
             track_players = mem.track_players()
             old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
             clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
-            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash))
+            # Claims that agree pool their participants: who this sighting saw joins the entry
+            # (DESIGN.md §6.4 step 1), so a player only the second window identified is not lost.
+            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash,
+                                                              () if clash else event.participants))
             if clash:
                 mem.open_case(t_known, [eid, obs_id], "claims_disagree", [obs_id])
             return eid
@@ -113,7 +129,7 @@ class ConsistencyChecker:
             return
         eid = mem.add_entry(t_known, Identity(key, player),
                             Justification("vote:" + "/".join(map(str, key)) + ":" + player, "observation", True))
-        if claims:
+        if claims and self.gate is None:     # the gating baseline has no cases: the later claim wins
             mem.open_case(t_known, [c for c, _ in claims] + [eid], "claims_disagree")
 
     # ---- constraints on a new entry ----
@@ -184,7 +200,7 @@ class ConsistencyChecker:
         (opening one if there is none) as one more independent source. Returns the case id
         when the case has just reached `off_roster_k` sources: per-frame perception conflicts
         go to the arbiter only then, so one misread never does (DESIGN.md §6.4)."""
-        if not self.enabled:
+        if not self.enabled or self.gate is not None:
             return None
         case = next((c for c in mem.cases.values() if c.status == "open" and c.constraint == "off_roster_read"
                      and c.members[0].endswith(":" + player)), None)
@@ -201,7 +217,7 @@ class ConsistencyChecker:
         """Open a case for every foul with no restart after it, and every free kick with no
         infringement before it, once `missing_wait` s of match time have passed since the
         event (so the partner's window has been analysed and its result has arrived)."""
-        if not self.enabled:
+        if not self.enabled or self.gate is not None:
             return
         events = live_events(mem)
         cased = {(m, c.constraint) for c in mem.cases.values() for m in c.members}

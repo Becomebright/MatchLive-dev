@@ -33,13 +33,17 @@ class Candidate:
     participants: tuple[tuple[str, tuple], ...]   # (role, track key (half, shot_id, track_id))
     evidence: tuple[float, ...]             # seconds of the frames the model cites
     replay: bool                            # seen in a replay, so it happened earlier
+    # Only for the confidence-gating baseline (DESIGN.md §10, events.ask_confidence): the model's
+    # own confidence, 0-1. The method never asks for it (DESIGN.md §4).
+    confidence: float | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Candidate":
         # The inverse of the __dict__ dump scripts/run_events.py writes: JSON turned the
         # tuples into lists.
         return cls(d["type"], d["team"], d["second"],
-                   tuple((role, tuple(key)) for role, key in d["participants"]), tuple(d["evidence"]), d["replay"])
+                   tuple((role, tuple(key)) for role, key in d["participants"]), tuple(d["evidence"]), d["replay"],
+                   d.get("confidence"))
 
 
 @dataclass(frozen=True)
@@ -85,10 +89,11 @@ Answer with JSON only:
 
 def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple[float, np.ndarray]],
                   perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None]]],
-                  prematch: Mapping[str, Any], sample_fps: float) -> Request:
+                  prematch: Mapping[str, Any], sample_fps: float, ask_confidence: bool = False) -> Request:
     """`frames`: (second, BGR image) of the sampled frames; `perceived`: second ->
     (tracks with identity, key of the track nearest the ball, number read clearly off each
-    track) at that frame (see runtime.runner.resolve_frames); `prematch`: Match.prematch."""
+    track) at that frame (see runtime.runner.resolve_frames); `prematch`: Match.prematch.
+    `ask_confidence` (the confidence-gating baseline only) adds a "confidence" to each event."""
     teams, kits, sides = prematch["teams"], prematch["jersey_colors"], prematch["sides"][half]
     block, images, pid_of = labelled_frames(frames, perceived, prematch)
     t0, t1 = window
@@ -96,6 +101,9 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
         window=f"half {half}, {clock(t0)}-{clock(t1)} of the half video",
         home=teams["home"], away=teams["away"], home_kit=kits["home"][0], away_kit=kits["away"][0],
         home_side=sides["home"], away_side=sides["away"], n=len(frames), fps=sample_fps)
+    if ask_confidence:
+        text += ('\nAlso give each event a "confidence": how sure you are, from 0 to 1, that it happened '
+                 'as you report it, e.g. {"type": "shot", ..., "confidence": 0.8}.')
     return Request([text + "\n\n" + block, *images],
                    {pid: (half, *key) for key, pid in pid_of.items()},
                    [second for second, _ in frames])
@@ -173,8 +181,9 @@ def parse_candidates(text: str, request: Request) -> list[Candidate]:
         evidence = tuple(request.seconds[k - 1] for k in e.get("evidence_frames") or []
                          if isinstance(k, int) and 1 <= k <= n)
         team = e.get("team") if e.get("team") in ("home", "away") else None
+        conf = e.get("confidence")
         out.append(Candidate(e["type"], team, request.seconds[frame - 1], participants, evidence,
-                             bool(e.get("replay"))))
+                             bool(e.get("replay")), float(conf) if isinstance(conf, (int, float)) else None))
     return out
 
 

@@ -4,7 +4,8 @@ MatchRunner makes one pass over a half video and writes the raw perception cache
 (matchlive.common.cache). run_live() then plays the whole match forward on one match clock:
 identity voting frame by frame (fed by memory, loop.state_to_perception), the event analyzer
 on every fixed window, the consistency check and the arbiter — each API answer taking effect
-at its issue time + measured latency, as it would live. replay_events() is the older loop over
+at its issue time + measured latency, as it would live. run_commentary() drives the commentary
+over a live run's memory on the same clock. replay_events() is the older loop over
 analyzer answers cached by scripts/run_events.py, kept for the subagent arbiter
 (scripts/run_arbiter.py).
 """
@@ -269,7 +270,8 @@ def off_roster_obs(half: int, key: tuple, player: str) -> str:
     return f"read:{half}/{key[0]}/{key[1]}:{player}"
 
 
-def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> MatchMemory:
+def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrupt=None,
+             until: tuple[int, float] | None = None) -> MatchMemory:
     """The whole match, live, from the raw perception cache (DESIGN.md §6.10 offline mode).
 
     One match clock drives everything, half by half and frame by frame:
@@ -290,6 +292,10 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
     (each window's call and candidates), cases.json (each arbitrated case), and
     perceived_half<h>.pkl (second -> the frame as the analyzer was told about it, at the
     sampled seconds, for the QA's current view). Returns memory.
+
+    For the error-injection experiment (DESIGN.md §10 phase 4): `corrupt(half, window, candidates)`
+    returns the candidates the analyzer is taken to have answered instead (e.g. without a
+    substitution, or with a card given to the wrong player); `until` stops the match clock there.
     """
     import heapq
     import itertools
@@ -348,6 +354,11 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
               f"{'verdict' if decision.verdict else decision.note} ({decision.calls} calls, {decision.latency:.0f}s)",
               flush=True)
         if decision.verdict is None:
+            # No usable answer (malformed JSON, out of rounds or API retries) is a void verdict
+            # too: one more try, told why, once this one's time has passed (DESIGN.md §6.6).
+            if not void:
+                heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "retry",
+                                       (case, opened, decision.note)))
             return
         elapsed = t[1] - opened[1] + decision.latency if t[0] == opened[0] else float("inf")
         if elapsed > config["arbiter"]["deadline"]:
@@ -380,6 +391,11 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         # the arbiter gets one more try, told why (DESIGN.md §6.6).
                         arbitrate(mem.cases[record["case"]], when, record["opened"], record["void"])
                 continue
+            if kind == "retry":
+                case, opened, note = payload
+                if case.status == "open":
+                    arbitrate(case, when, opened, note)
+                continue
             checker.tick(mem, when)
             half, r = payload
             for i, c in enumerate(r["candidates"]):
@@ -388,6 +404,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
             settle(when)
 
     for half in (1, 2):
+        if until is not None and half > until[0]:
+            break
         arrays, meta = load_perception(cache_path(config, match.video_path(half), match.name, half, 0, None))
         fps = meta["fps"]
         duration = meta["n_frames"] / fps
@@ -420,7 +438,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         images[wanted[video["pos"]]] = image
                 video["pos"] += 1
             shown = [(s, images[s]) for s in grid if window[0] <= s < window[1] and s in images]
-            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"])
+            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"], ev["ask_confidence"])
             # The player behind each track as last seen in the window — what the model was told.
             players_of = {(half, *tr.key): tr.player_id
                           for s, _ in shown for tr in perceived.get(s, ((), None, ()))[0] if tr.player_id}
@@ -434,6 +452,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                 return
             cands = [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
                      for c in parse_candidates(result.text, request)]
+            if corrupt is not None:
+                cands = corrupt(half, window, cands)
             r = {"half": half, "window": window, "call_id": result.call_id, "model": result.model,
                  "latency": result.latency, "cached": result.cached, "candidates": cands}
             windows_log.write(json.dumps(r) + "\n")
@@ -450,6 +470,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
         w = 0
         for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
             second = frame_idx / fps
+            if until is not None and (half, second) > until:
+                break
             while w < len(windows) and windows[w][1] <= second:
                 fire(windows[w])
                 w += 1
@@ -475,15 +497,157 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client) -> Mat
                         arbitrate(mem.cases[case_id], (half, second))
             if frame_idx in wanted:
                 perceived[wanted[frame_idx]] = frame_view(config, tracks, jersey, det)
-        while w < len(windows):
+        while w < len(windows) and (until is None or (half, windows[w][1]) <= until):
             fire(windows[w])
             w += 1
         cap.release()
         with open(out_dir / f"perceived_half{half}.pkl", "wb") as f:
             pickle.dump(perceived, f)
 
-    # After the final whistle: the last answers and verdicts land.
-    advance((3, 0.0))
+    # After the final whistle (or at `until`): the last answers and verdicts land.
+    advance((3, 0.0) if until is None else until)
     windows_log.close()
     (out_dir / "cases.json").write_text(json.dumps(records, indent=1, default=str))
     return mem
+
+
+def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
+                   only: tuple[int, float, float] | None = None) -> list[dict]:
+    """Live commentary (DESIGN.md §6.9) over a live run (run_live's output in `run_dir`).
+
+    The broadcast output runs `output_delay` (D) s behind the live feed, and the commentary is laid
+    out on the output's timeline. At match time t on the feed the viewer is at t - D: the policy
+    plans the line that goes on air next — about what the viewer will be watching then — from
+    memory as known at t, i.e. with D s of hindsight on that moment, and says nothing about what the
+    viewer has not seen yet. A play line is written over the frames on air (the last `play_span` s
+    up to it, labelled with who each tracked player is as far as known by t; runtime.qa_tools). The
+    line is generated (one model call through `client`) and voiced (one text-to-speech call); it
+    is ready at t + both latencies and goes on air at ready - D, or when the previous line has
+    ended, and lasts as long as its audio. The next line is planned while this one is being spoken,
+    so that it is ready as this one ends (+ `pause`).
+
+    Commentary only reads memory, and memory as known at t is a prefix of the run's op log
+    (DESIGN.md §5.4), so driving it from the log after the run gives the lines a live run would
+    have given with the same latencies. A generation that fails after its retries loses the line,
+    as it would live; a failed synthesis leaves it a subtitle only. `only` = (half, start, end)
+    restricts the commentary to that stretch of video time (a trial).
+
+    Returns one record per line: its kind, entry, text and tone, the entry's status and the players
+    the line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
+    (t_event), when it is on air ("show": half, start, end in video time), the audio (path,
+    duration), and the calls' ids and latencies.
+    """
+    import copy
+    import json
+    import pickle
+    from collections import deque
+
+    from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
+    from matchlive.app.tts import Voice
+    from matchlive.common.api import NoAPIKey
+    from matchlive.events.analyzer import clock
+    from matchlive.runtime.qa_tools import QATools
+
+    cfg = config["commentary"]
+    delay = cfg["output_delay"]
+    mem = MatchMemory(match.prematch["players"], log_path=run_dir / "ops.jsonl", cascade=config["loop"]["cascade"])
+    windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
+    sources = {f"obs:{w['call_id']}#{i}": {"window": w["window"], "candidate": c}
+               for w in windows for i, c in enumerate(w.get("candidates", []))}
+    half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
+    # The frames on air for play lines, labelled as the QA's current view is.
+    perceived = {h: pickle.load(open(run_dir / f"perceived_half{h}.pkl", "rb")) for h in (1, 2)}
+    view_config = copy.deepcopy(config)
+    view_config["qa"]["max_frames"] = cfg["play_frames"]
+    pictures = QATools(view_config, match, mem, perceived, sources)
+    policy = CommentaryPolicy(cfg, match.prematch, sources)
+    commentator = Commentator(cfg, lambda parts: client.generate(parts, json_output=True))
+    voice = Voice(cfg["voice"], client.speech)
+    lines: list[dict] = []
+    for half in (1, 2):
+        if only and only[0] != half:
+            continue
+        first, last = (only[1], only[2]) if only else (0.0, half_end[half])
+        ends = first                       # video time the previous line ends (+ pause)
+        # How long a line takes to generate and voice: planned with the median of the last few + a
+        # margin (one slow call must not throw the plan out); a line that is not ready in time is
+        # dropped (before it is voiced, if possible).
+        took = deque([10.0], maxlen=5)
+        # Voicing is planned the same way, from the last few voiced lines: a line found too late is
+        # dropped before it is voiced, so a single slow voicing taken as the estimate would make
+        # every later line look too late, and never be replaced.
+        spoke = deque([1.5], maxlen=5)
+
+        def expected():
+            return sorted(took)[len(took) // 2] + 2.0
+
+        t = free = first + delay - expected()                    # match time on the feed
+        while t - delay <= last:
+            if t < free:
+                t += cfg["tick"]
+                continue
+            # The moment on air: when this line will be ready — never past the feed (its frames).
+            on_air = (half, min(max(t + expected() - delay, ends), t - 1.0))
+            if on_air[1] > last:
+                break
+            item = policy.decide(mem.at((half, t)), on_air)
+            frames = None
+            if item.kind in ("play", "analysis"):
+                frames = pictures.call((half, t), "get_frames", {"half": half, "start": item.t_event[1], "end": on_air[1]})
+                if not frames.images:          # nothing to look at (e.g. no frames yet)
+                    t += cfg["tick"]
+                    continue
+                # Pre-match background on a player the pictures identify, now and then.
+                item.facts += policy.on_screen(frames.text, on_air)
+            try:
+                text, tone, latency, call_id, phrases = commentator.line(item, [line["text"] for line in lines], frames)
+            except NoAPIKey:
+                raise
+            except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
+                print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
+                t += cfg["tick"]
+                continue
+
+            def lateness(ready):
+                start = max(ready - delay, ends)
+                if item.t_event and item.t_event[0] == half and item.kind not in ("play", "analysis"):
+                    start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
+                return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
+
+            speak_took = sorted(spoke)[len(spoke) // 2]
+            start, late = lateness(t + latency + speak_took)
+            if not late:
+                try:
+                    spoken = voice.say(text, tone, analyst=item.kind == "analysis")
+                    audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
+                    spoke.append(tts_latency)
+                except NoAPIKey:
+                    raise
+                except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
+                    if "dry run" not in str(e):
+                        print(f"{half}H {t:.0f}s no voice: {e}", flush=True)
+                    audio, duration, tts_latency = None, speaking_time(text, cfg["words_per_second"]), 0.0
+                start, late = lateness(t + latency + tts_latency)
+            took.append(latency + speak_took)
+            if late:
+                # Ready too late for the moment it was written for (a slow call): live, it is dropped —
+                # and not picked again (its moment has passed).
+                print(f"{half}H {t:.0f}s [{item.kind}] too late by {start - on_air[1]:.0f} s: dropped", flush=True)
+                policy.dropped(item, on_air)
+                t += cfg["tick"]
+                continue
+            ready = t + latency + tts_latency
+            policy.said(item, text, (half, start))
+            lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
+                          "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
+                          "t_event": item.t_event, "show": (half, start, start + duration), "facts": item.facts,
+                          "pictures": frames.text if frames is not None else None,   # who is who in its frames
+                          "phrases": phrases,                                          # a play line's burst
+                          "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
+                          "tts_latency": tts_latency})
+            print(f"{half}H {clock(start)} [{item.kind}/{tone}] {text}", flush=True)
+            ends = start + duration + cfg["pause"]
+            # Plan the next line so that it is ready as this one ends.
+            free = max(t + cfg["tick"], ends + delay - expected())
+            t += cfg["tick"]
+    return lines

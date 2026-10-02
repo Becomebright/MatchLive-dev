@@ -7,6 +7,8 @@ Replaying from the cache is what lets offline runs apply a result at "issue time
 measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share calls whose
 inputs are identical. The key does not depend on the endpoint: the same model answers the
 same request wherever it is reached, so answers cached before a change of endpoint stay valid.
+Text-to-speech for the commentary (speech()) goes through the same endpoints and is cached the
+same way, as MP3 files.
 
 The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
 (configs/api.local.yaml, gitignored: keys never go into the repo), in order: the next one takes
@@ -45,11 +47,20 @@ class APIResult:
     cached: bool
 
 
+@dataclass(frozen=True)
+class SpeechResult:
+    call_id: str
+    path: Path          # the MP3 in the speech cache
+    latency: float      # seconds, measured when the call was actually made
+    cached: bool
+
+
 class APIClient:
     def __init__(self, config: dict[str, Any], cache_dir: Path):
         # `config` is the `api` section of the YAML config.
         self.config = config
         self.cache_dir = cache_dir / config["cache"]
+        self.speech_dir = cache_dir / config.get("speech_cache", "tts")
         self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
         self._current = 0                        # the endpoint in use; the next takes over when it gives out
         self._lock = threading.Lock()
@@ -89,6 +100,47 @@ class APIClient:
              "endpoint": str(client.base_url)}
         _write(path, json.dumps(d).encode())
         return APIResult(call_id, d["text"], d["model"], latency, cached=False)
+
+    def speech(self, text: str, voice: str, instructions: str, model: str) -> SpeechResult:
+        """`text` spoken by `voice` in the manner `instructions` describe (text-to-speech, MP3),
+        cached like generate() under the hash of the request, in paths.cache/<api.speech_cache>."""
+        request = {"model": model, "voice": voice, "instructions": instructions, "text": text, "format": "mp3"}
+        call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
+        path = self.speech_dir / f"{call_id}.mp3"
+        meta = path.with_suffix(".json")
+        if path.exists() and meta.exists():
+            return SpeechResult(call_id, path, json.loads(meta.read_text())["latency"], cached=True)
+
+        def call(client):
+            audio = client.audio.speech.create(model=model, voice=voice, input=text, instructions=instructions,
+                                               response_format="mp3").read()
+            if not audio:
+                raise ValueError("empty audio")
+            return audio
+
+        audio, latency, client = self._call(call)
+        _write(path, audio)
+        _write(meta, json.dumps({"latency": latency, "model": model, "endpoint": str(client.base_url)}).encode())
+        return SpeechResult(call_id, path, latency, cached=False)
+
+    def transcribe(self, audio: Path, model: str) -> dict:
+        """Speech-to-text of an audio file with segment timestamps ({"text", "segments": [{"start",
+        "end", "text"}]}), cached under the hash of the model and the audio. For evaluation only:
+        the live system never listens to the broadcast (DESIGN.md §11 D1)."""
+        data = audio.read_bytes()
+        call_id = hashlib.sha256(json.dumps({"model": model}).encode() + data).hexdigest()[:16]
+        path = self.speech_dir / "transcripts" / f"{call_id}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+
+        def call(client):
+            r = client.audio.transcriptions.create(model=model, file=(audio.name, data), response_format="verbose_json",
+                                                   timestamp_granularities=["segment"])
+            return {"text": r.text, "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in r.segments or []]}
+
+        out, _, _ = self._call(call)
+        _write(path, json.dumps(out).encode())
+        return out
 
     def _call(self, call):
         """Run `call(sdk client)` against the endpoints: transient errors (overload, timeouts) are

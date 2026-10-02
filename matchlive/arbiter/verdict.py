@@ -87,7 +87,7 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
         if op == "support":
             if a.get("entry") not in mem.entries:
                 return f"support: unknown entry {a.get('entry')!r}"
-            writes.append(("support", a["entry"]))
+            writes.append(("support", (a["entry"], ())))
         elif op == "reject":
             if a.get("observation") not in cited:
                 return f"reject: unknown observation {a.get('observation')!r}"
@@ -124,7 +124,8 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
                            if j.kind == "observation" and j.obs_id not in mem.rejected]
                 writes.append(("add_event", event))
             else:
-                writes.append(("support", same[0]) if same else ("add_event", event))
+                # Supporting an entry, the verdict's participants join it like any agreeing claim's.
+                writes.append(("support", (same[0], parts)) if same else ("add_event", event))
         elif op == "identity":
             try:
                 key, player = tuple(int(x) for x in a["track"]), str(a["player"])
@@ -142,7 +143,8 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
     obs = f"verdict:{case_id}"
     for op, x in writes:
         if op == "support":
-            mem.add_justification(t_known, x, Justification(obs, "verdict", True))
+            entry_id, parts = x
+            mem.add_justification(t_known, entry_id, Justification(obs, "verdict", True, parts))
         elif op == "reject":
             mem.reject_observation(t_known, x)
         else:
