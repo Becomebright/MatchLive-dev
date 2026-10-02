@@ -1,6 +1,7 @@
 """Match memory: an append-only op log of beliefs and their justifications (DESIGN.md §6.7).
 
-Nothing derived is stored. An entry's status comes from its justifications on every read
+Nothing derived is stored, except each entry's participants pooled from its justifications
+(kept current on every op, see _rebuild). An entry's status comes from its justifications on every read
 (DESIGN.md §5.2), and so do the rule inferences (score, lineups, cards, stats — see
 matchlive.memory.view) and the player behind every event participant. A correction —
 rejecting an observation, confirming a different identity — therefore reaches everything
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import json
 from bisect import bisect_right
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -36,7 +37,10 @@ class MatchMemory:
         self.roster: dict[str, Mapping[str, Any]] = {str(p["hash"]): p for p in roster}
         self.cascade = cascade
         self.ops: list[Op] = []
-        self.entries: dict[str, Event | Identity] = {}            # insertion order = write order
+        # Each entry as it reads now: as written, plus the participants its holding justifications
+        # add (_rebuild). Insertion order = write order.
+        self.entries: dict[str, Event | Identity] = {}
+        self.written: dict[str, Event | Identity] = {}            # each entry as it was written
         self.justifications: dict[str, list[tuple[Time, Justification]]] = {}
         self.rejected: dict[str, Time] = {}                        # obs_id -> when it was rejected
         self.cases: dict[str, Case] = {}
@@ -107,12 +111,19 @@ class MatchMemory:
     def _apply(self, op: Op) -> None:
         p = op.payload
         if op.kind == "add_entry":
-            self.entries[p["entry_id"]] = _decode_entry(p["entry"])
-            self.justifications[p["entry_id"]] = [(op.t_known, Justification(**p["justification"]))]
+            self.entries[p["entry_id"]] = self.written[p["entry_id"]] = _decode_entry(p["entry"])
+            self.justifications[p["entry_id"]] = [(op.t_known, _decode_justification(p["justification"]))]
         elif op.kind == "add_justification":
-            self.justifications[p["entry_id"]].append((op.t_known, Justification(**p["justification"])))
+            j = _decode_justification(p["justification"])
+            self.justifications[p["entry_id"]].append((op.t_known, j))
+            if j.participants:
+                self._rebuild(p["entry_id"])
         elif op.kind == "reject_observation":
             self.rejected.setdefault(p["obs_id"], op.t_known)
+            # The participants the rejected observation brought leave the entries it supported.
+            for entry_id, js in self.justifications.items():
+                if any(j.obs_id == p["obs_id"] and j.participants for _, j in js):
+                    self._rebuild(entry_id)
         elif op.kind == "open_case":
             self.cases[p["case_id"]] = Case(p["case_id"], tuple(p["members"]), p["constraint"],
                                             list(p["evidence"]))
@@ -133,6 +144,23 @@ class MatchMemory:
                 if old is not None:
                     players = tuple(o or n for o, n in zip(old, players))
                 self._counted_once[entry_id] = players
+
+    def _rebuild(self, entry_id: str) -> None:
+        """The entry as written, plus the participants of its justifications that still hold
+        (DESIGN.md §6.4 step 1): a role it lacks is added, a role it has gets the track as an
+        alternate. Kept up to date on every op that can change it, so reads see it directly."""
+        e = self.written[entry_id]
+        parts = list(e.participants)
+        for _, j in self.justifications[entry_id]:
+            if j.obs_id in self.rejected:
+                continue
+            for q in j.participants:
+                i = next((k for k, part in enumerate(parts) if part.role == q.role), None)
+                if i is None:
+                    parts.append(q)
+                elif q.track_key not in (parts[i].track_key, *parts[i].alternates):
+                    parts[i] = replace(parts[i], alternates=parts[i].alternates + (q.track_key,))
+        self.entries[entry_id] = replace(e, participants=tuple(parts))
 
     # ---- derived on read ----
 
@@ -193,8 +221,15 @@ class MatchMemory:
 
 
 def resolve_players(event: Event, track_players: Mapping[tuple, str]) -> tuple[str | None, ...]:
-    # A participant named directly wins; otherwise its track's confirmed identity, if any.
-    return tuple(p.player_id or track_players.get(p.track_key) for p in event.participants)
+    # A participant named directly wins; otherwise its track's confirmed identity, else the
+    # first of its alternate tracks (other sightings of the event) with one.
+    players = [p.player_id or track_players.get(p.track_key)
+               or next((track_players[k] for k in p.alternates if k in track_players), None)
+               for p in event.participants]
+    # One player takes one role in an event. A player found in two roles (e.g. a substitution
+    # whose "in" and "out" tracks were both identified as Oscar) is a misidentification, and
+    # neither role can say which: both stay unidentified.
+    return tuple(None if pid and players.count(pid) > 1 else pid for pid in players)
 
 
 def _decode_entry(d: Mapping[str, Any]) -> Event | Identity:
@@ -203,10 +238,19 @@ def _decode_entry(d: Mapping[str, Any]) -> Event | Identity:
     # this is also where the track-key contract is checked.
     if d["kind"] == "identity":
         return Identity(_track_key(d["track_key"]), d["player_id"])
-    return Event(
-        d["type"], d["team"], (tuple(d["t_interval"][0]), tuple(d["t_interval"][1])),
-        tuple(Participant(p["role"], None if p["track_key"] is None else _track_key(p["track_key"]),
-                          p["player_id"]) for p in d["participants"]))
+    return Event(d["type"], d["team"], (tuple(d["t_interval"][0]), tuple(d["t_interval"][1])),
+                 tuple(map(_decode_participant, d["participants"])))
+
+
+def _decode_justification(d: Mapping[str, Any]) -> Justification:
+    # Logs written before justifications carried participants have none.
+    return Justification(d["obs_id"], d["kind"], d["sufficient"],
+                         tuple(map(_decode_participant, d.get("participants", ()))))
+
+
+def _decode_participant(p: Mapping[str, Any]) -> Participant:
+    return Participant(p["role"], None if p["track_key"] is None else _track_key(p["track_key"]), p["player_id"],
+                       tuple(map(_track_key, p.get("alternates", ()))))
 
 
 def _track_key(key) -> tuple:

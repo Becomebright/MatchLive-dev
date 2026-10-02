@@ -8,7 +8,12 @@ outputs/live/<match>/<run>/) knew at that moment: memory as known by then, perce
 to then. The model sees the question and its options and nothing else from the benchmark (its match
 key carries the final score).
 
-Writes outputs/qa/<match>/<run>/<mode>[_<tag>].jsonl, one line per question, and prints accuracy per
+Modes: tools and dump_log (qa.mode), and the ablation baselines (docs/results.md §17), one call each
+with the squads: blind (nothing else), video (the last qa.current_view s of raw frames), events (the
+analyzer's raw output: the event log of a run made with loop.consistency=false, without status tags).
+--model swaps the QA model only; the live run's analyzer and arbiter stay what they were.
+
+Writes outputs/qa/<match>/<run>/<mode>[_<tag>][_<model>].jsonl, one line per question, and prints accuracy per
 subcategory with the predicted-letter distribution and the always-"A" baseline (dim1's answers
 lean to A by construction, docs.md §8).
 """
@@ -24,7 +29,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from matchlive.app.qa import QAAgent, question_text
+from matchlive.app.qa import BLIND_INSTRUCTIONS, EVENTS_INSTRUCTIONS, VIDEO_INSTRUCTIONS, QAAgent, question_text
 from matchlive.common.api import APIClient, NoAPIKey
 from matchlive.common.config import REPO_ROOT, load_config, run_overrides
 from matchlive.common.match import Match
@@ -38,7 +43,8 @@ def main():
     ap.add_argument("--match", required=True)
     ap.add_argument("--run", default="full", help="live run name (scripts/run_live.py --name)")
     ap.add_argument("--mode", default=None,
-                    help="tools | dump_log (default: qa.mode) | blind (a sanity check: no memory, no video)")
+                    help="tools | dump_log (default: qa.mode) | blind | video | events (ablation baselines)")
+    ap.add_argument("--model", default=None, help="the QA model (api.model); appended to the result file's name")
     ap.add_argument("--benchmark", default="dataset/streamingqa/part1/benchmark-0926.jsonl",
                     help="a JSONL of both matches' questions (with match_key), or a folder of per-match files named "
                          "after the match (a metadata row, then the questions)")
@@ -52,8 +58,10 @@ def main():
 
     run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
     # The run's own settings (e.g. loop.cascade off decides how memory is read).
-    config = load_config(overrides=run_overrides(run_dir))
+    config = load_config(overrides=run_overrides(run_dir) + ([f"api.model={args.model}"] if args.model else []))
     mode = args.mode or config["qa"]["mode"]
+    # The events baseline is the analyzer's output unchecked: every candidate its own entry.
+    assert mode != "events" or not config["loop"]["consistency"], "--mode events reads a loop.consistency=false run"
     match = Match(config, args.match)
     # Read from a copy of the complete lines: the live run may still be appending to the log.
     lines = open(run_dir / "ops.jsonl").read().split("\n")[:-1]
@@ -90,8 +98,13 @@ def main():
                 a = agent.answer(text, letters, lambda tool, targs: tools.call(now, tool, targs))
             elif mode == "dump_log":
                 a = agent.answer_from_log(text, letters, tools.dump_log(now))
-            else:   # blind: nothing about the match — what the question and options alone give away
-                a = agent.answer_from_log(text, letters, "(nothing has been recorded)")
+            elif mode == "events":
+                a = agent.answer_once([EVENTS_INSTRUCTIONS, tools.dump_log(now, status=False), text], letters)
+            elif mode == "video":
+                a = agent.answer_once([VIDEO_INSTRUCTIONS.format(seconds=config["qa"]["current_view"]),
+                                       tools.squads(), *tools.raw_view(now), text], letters)
+            else:   # blind: the squads only — what the question and options alone give away
+                a = agent.answer_once([BLIND_INSTRUCTIONS, tools.squads(), text], letters)
             out = {"choice": a.choice, "calls": a.calls, "latency": a.latency, "tools": a.tools}
         except NoAPIKey:
             raise
@@ -109,7 +122,8 @@ def main():
                 print(f"{n}/{len(rows)} answered, {time.time() - t0:.0f} s", flush=True)
 
     # A partial run (one half, the first N questions) never overwrites the full result file.
-    name = mode + (f"_{args.tag}" if args.tag else "") + (f"_half{args.half}" if args.half else "") \
+    name = mode + (f"_{args.tag}" if args.tag else "") + (f"_{args.model}" if args.model else "") \
+        + (f"_half{args.half}" if args.half else "") \
         + (f"_first{args.limit}" if args.limit else "")
     out_path = config["paths"]["outputs"] / "qa" / args.match / args.run / f"{name}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)

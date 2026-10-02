@@ -33,6 +33,11 @@ class Participant:
     # inferred substitution).
     track_key: tuple | None = None
     player_id: str | None = None                # roster hash
+    # Tracks other sightings of the same event saw in this role (different windows track the
+    # same player under different keys): the role's player is the first of track_key,
+    # alternates that has a confirmed identity. Filled in by memory from the justifications
+    # that brought them (MatchMemory._rebuild), never written with the entry.
+    alternates: tuple[tuple, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,10 @@ class Justification:
     obs_id: str
     kind: str                                   # "observation" | "verdict"
     sufficient: bool                            # enough on its own to confirm (DESIGN.md §6.4)
+    # The participants a matching observation names (DESIGN.md §6.4 step 1). While it holds,
+    # they join the entry: a role the entry lacks is added, a role it has gets the track as an
+    # alternate. Rejecting the observation takes them out again.
+    participants: tuple[Participant, ...] = ()
 
 
 @dataclass
