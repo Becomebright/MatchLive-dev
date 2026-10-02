@@ -25,7 +25,8 @@ word of the fact, such as a name or a number, that the rest of the line's materi
 Coverage: the visible true events some line spoke of (news or a confirmation). Style, next to the
 broadcast's own commentary (scripts/transcribe_broadcast.py): the share of match time spoken, words
 per minute of match, lines per minute, words per line, lexical variety (distinct word pairs) and
-lines opening like one of the ten before them.
+lines opening like one of the ten before them. A play line said as a burst of short phrases counts
+as its phrases.
 """
 
 from __future__ import annotations
@@ -188,7 +189,9 @@ def main():
             ranges = [tuple(only)] if only else [(h, 0.0, max(w["window"][1] for w in windows if w["half"] == h)) for h in (1, 2)]
             match_seconds = sum(b - a for _, a, b in ranges)
             seconds += match_seconds
-            texts += [l["text"] for l in lines]
+            # A play line said as a burst of phrases counts phrase by phrase (as the broadcast's
+            # transcript is cut at its pauses).
+            texts += [t for l in lines for t in (l.get("phrases") or [l["text"]])]
             speech += sum(l.get("duration") or 0.0 for l in lines)
             for line in lines:
                 text["lines"] += 1

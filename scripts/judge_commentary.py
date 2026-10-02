@@ -66,6 +66,8 @@ def main():
     ap.add_argument("--judge", default="gpt-5", help="the judge model (another family than the generator)")
     ap.add_argument("--match", action="append", default=None, help="default: both benchmark matches")
     ap.add_argument("--versus", default=None, help="compare each run with this run of ours instead of the broadcast")
+    ap.add_argument("--only", nargs=3, type=float, metavar=("HALF", "START", "END"), default=None,
+                    help="draw the minutes from this stretch only (e.g. a trial's), so runs are judged on the same ones")
     args = ap.parse_args()
     config = load_config()
     out = config["paths"]["outputs"]
@@ -81,6 +83,8 @@ def main():
             other = [json.loads(l) for l in open(out / "commentary" / name / args.versus / "lines.jsonl")] if args.versus else None
             rng = random.Random(name)
             candidates = [(h, float(s)) for h in (1, 2) for s in range(60, int(max(x["end"] for x in human[h])) - 60, 30)]
+            if args.only:
+                candidates = [(h, s) for h, s in candidates if h == args.only[0] and args.only[1] <= s and s + 60 <= args.only[2]]
             rng.shuffle(candidates)
             taken = 0
             for h, start in candidates:

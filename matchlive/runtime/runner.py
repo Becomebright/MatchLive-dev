@@ -590,7 +590,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 # Pre-match background on a player the pictures identify, now and then.
                 item.facts += policy.on_screen(frames.text, on_air)
             try:
-                text, tone, latency, call_id = commentator.line(item, [line["text"] for line in lines], frames)
+                text, tone, latency, call_id, phrases = commentator.line(item, [line["text"] for line in lines], frames)
             except NoAPIKey:
                 raise
             except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
@@ -632,6 +632,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                           "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
                           "t_event": item.t_event, "show": (half, start, start + duration), "facts": item.facts,
                           "pictures": frames.text if frames is not None else None,   # who is who in its frames
+                          "phrases": phrases,                                          # a play line's burst
                           "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
                           "tts_latency": tts_latency})
             print(f"{half}H {clock(start)} [{item.kind}/{tone}] {text}", flush=True)

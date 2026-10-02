@@ -50,7 +50,7 @@ commentary:
   context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
   context_stale: 600                   # s after which an angle on the match may be said again unchanged
   background_every: 60                 # s on air at least between two pre-match facts given over the pictures
-  play_words: 12                       # a play line is usually this short
+  play_words: 12                       # a play line (a burst of short phrases) has at most this many words
   play_span: 6                         # s of pictures a play line is written over
   play_frames: 8                       # frames shown for them
   analysis_every: 30                   # s on air between the co-commentator's views of the play

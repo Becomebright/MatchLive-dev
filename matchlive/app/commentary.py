@@ -584,12 +584,13 @@ Answer with JSON only: {{"line": "...", "tone": "excited" | "lively" | "calm"}} 
 
 PLAY_PROMPT = """You are the TV commentator of this football match, speaking live on air in {language}. Below are the
 last {span:.0f} seconds of broadcast pictures, in order; tracked players carry a label (P1, P2, ...) and the text
-before the pictures says who each one is, as far as is known. Say what you would say over these pictures right now:
-usually no more than {play_words} words (up to {max_words} for a big moment).
-- Commentate the play the way British TV commentators do: short, spoken, present tense, and varied in form — sometimes
-  just a name or two ("Kante... Hazard."), a quick reaction ("Good ball!", "Oh, loose from Matic."), a question ("Can
-  Liverpool find a way through here?"), the tempo or the crowd ("Stamford Bridge getting restless."), or what an
-  on-screen graphic shows; not a pass-by-pass list every time.
+before the pictures says who each one is, as far as is known. Say what you would say over these pictures right now,
+the way a live TV commentator talks: in short bursts — one to three phrases said one after another as the play
+moves on, each usually two to six words, {play_words} words in all at most (a phrase giving background may be longer).
+- A phrase is a name as he gets the ball, what he does with it, a quick reaction, a question, the tempo or the crowd,
+  or what an on-screen graphic shows: ["Kante.", "Wins it back...", "Hazard!"]; ["Lovely ball.", "Mane's away down
+  the right."]; ["Liverpool knocking it about at the back."]; ["Stamford Bridge getting restless."]. Present tense,
+  British TV style; vary the form, and don't list every pass.
 - Don't call goals, shots, saves, fouls, cards, offsides, corners or free kicks: those are called separately, once
   they are certain. If the pictures show a stoppage, a close-up, the crowd or a replay, say something that fits,
   from the facts given.
@@ -597,8 +598,8 @@ usually no more than {play_words} words (up to {max_words} for a big moment).
 - Say only what the pictures show and the facts give: no background of your own about players, clubs or seasons
   ("his first goal for the club", "since he joined"). Don't repeat your recent lines or start the same way as them.
 - If the facts give background to say in this line (pre-match knowledge about a player on screen), this line is
-  about him: say it now, briefly and in your own words, tied to what he is doing ("Kante — thirty-two million from
-  Leicester in the summer — and he's won it back again.").
+  about him: say it now, briefly and in your own words, tied to what he is doing (["Kante.", "Thirty-two million
+  from Leicester in the summer — and he's won it back again."]).
 
 Your recent lines:
 {history}
@@ -606,7 +607,8 @@ Your recent lines:
 Facts:
 {facts}
 
-Answer with JSON only: {{"line": "...", "tone": "excited" | "lively" | "calm"}} — the tone to say it in."""
+Answer with JSON only: {{"phrases": ["...", ...], "tone": "excited" | "lively" | "calm"}} — the phrases in the order
+you say them, and the tone to say them in."""
 
 
 ANALYSIS_PROMPT = """You are the co-commentator of this football match (a former player, alongside the main commentator),
@@ -637,9 +639,12 @@ class Commentator:
         self.cfg = config
         self.generate = generate
 
-    def line(self, item: Item, history: Sequence[str], frames: Any = None) -> tuple[str, str, float, str]:
-        """(the line, the tone to say it in, the call's latency in s, its call id). `frames` (a play
-        line only) are the pictures on air: an object with .text (who is who) and .images (JPEGs)."""
+    def line(self, item: Item, history: Sequence[str], frames: Any = None
+             ) -> tuple[str, str, float, str, list[str] | None]:
+        """(the line, the tone to say it in, the call's latency in s, its call id, its phrases). `frames`
+        (a play or co-commentator line) are the pictures on air: an object with .text (who is who)
+        and .images (JPEGs). A play line comes as a burst of short phrases, said one after another:
+        the line is the phrases joined; for other lines the phrases are None."""
         recent = "\n".join(f"- {h}" for h in history[-self.cfg["history"]:]) or "(none yet)"
         facts = "\n".join(f"- {f}" for f in item.facts)
         if item.kind == "play" and frames is not None:
@@ -656,7 +661,7 @@ class Commentator:
                                    kind=item.kind, facts=facts, history=recent)
             result = self.generate([prompt])
         answer = parse_json(result.text)
-        text = str(answer.get("line") or result.text).strip()
+        text, phrases = _said(answer, result.text)
         latency = result.latency
         if BACKGROUND.search(text) and "background" not in facts.lower():
             # Background of the model's own (a record, a career, a season): it may be wrong, or give
@@ -667,9 +672,19 @@ class Commentator:
                                    "(records, careers, seasons, clubs' history). Say it again without it."])
             latency += again.latency
             answer = parse_json(again.text)
-            text = str(answer.get("line") or text).strip()
+            text, phrases = _said(answer, text)
         tone = answer.get("tone") if answer.get("tone") in ("excited", "lively", "calm") else "lively"
-        return text, tone, latency, result.call_id
+        return text, tone, latency, result.call_id, phrases
+
+
+def _said(answer: Mapping[str, Any], fallback: str) -> tuple[str, list[str] | None]:
+    """(the line, its phrases): a burst of phrases joined, or the one line."""
+    phrases = answer.get("phrases")
+    if isinstance(phrases, list):
+        phrases = [str(p).strip() for p in phrases if str(p).strip()]
+        if phrases:
+            return " ".join(phrases), phrases
+    return str(answer.get("line") or fallback).strip(), None
 
 
 # Phrases that only background knowledge could supply: a player's record or career, a club's season or history.
