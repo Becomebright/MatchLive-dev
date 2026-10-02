@@ -18,7 +18,6 @@
 - **本地比赛录像**：切尔西–曼联（2016-02-07）和切尔西–利物浦（2016-09-16），720p、25fps，没有逐帧标注，只用来做人工检查和测速度。
 - 号码识别检查点 `jersey_dinov3_convnext_tiny-20_matches` 是用下面 20 场英超比赛训练的，**不含这两场本地比赛**（用户 2026-10-01 确认）。
   - 但其中 12 场有切尔西、曼联或利物浦参赛，两场本地比赛的很多球员出现在训练数据里，所以本地比赛上的号码结果对没见过的球员偏乐观。
-  - §11–§13 用的曼城 3–0 切尔西（2015-08-16）**在训练集里**，那几节的身份结果来自训练过的比赛。
   - 训练比赛（按赛季列出，省去文件夹名里的联赛前缀和开球时间）：
     - 2014-2015：2015-02-21 Chelsea 1-1 Burnley；2015-02-21 Swansea 2-1 Manchester United；2015-02-21 Crystal Palace 1-2 Arsenal；2015-02-22 Southampton 0-2 Liverpool；2015-04-11 Burnley 0-1 Arsenal；2015-05-17 Manchester United 1-1 Arsenal
     - 2015-2016：2015-08-08 Chelsea 2-2 Swansea；2015-08-16 Manchester City 3-0 Chelsea；2015-08-23 West Brom 2-3 Chelsea；2015-08-29 Chelsea 1-2 Crystal Palace；2015-08-29 Liverpool 0-3 West Ham；2015-08-29 Manchester City 2-0 Watford；2015-08-30 Swansea 2-1 Manchester United；2015-09-12 Everton 3-1 Chelsea；2015-09-26 Leicester 2-5 Arsenal；2015-11-29 Tottenham 0-0 Chelsea
