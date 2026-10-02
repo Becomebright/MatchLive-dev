@@ -59,7 +59,7 @@ commentary:
   recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
   hold: 5                              # s a pending event waits for its confirmation before it may go on air
   # A pending shot, corner, foul, ... goes on air (naming no one) after the hold. Off: minor events
-  # only once confirmed — half the pending ones are false (dry runs, results §23).
+  # only once confirmed — half the pending ones are false (dry runs, results §25).
   pending_minor: false
   echo: 60                             # s: a minor event this close to an aired one it repeats is not news (= consistency.pair_window)
   # News, most important first; the policy airs one line at a time, so the tail is filler.

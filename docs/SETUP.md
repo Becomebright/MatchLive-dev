@@ -71,6 +71,7 @@ like the repo root, so a single download drops every file in place:
 hf auth login                 # a token with read access to the repo
 hf download Becomebright/MatchLive-assets --repo-type dataset --local-dir . \
     --include "dataset/*" --include "checkpoints/*" --include "cache/*"
+tar -xzf cache/api.tar.gz -C cache    # -> cache/api/<call id>.json
 ```
 The caches make the results reproducible without a GPU or an API key (README, "Streaming QA"):
 the raw perception cache replaces a GPU pass over each half, and the API cache holds every
@@ -84,12 +85,13 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (3 matches) | 5.3G | every pipeline run (`paths.dataset`) |
 | `dataset/organized_data/.../2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-caption_with_gt.json` | 58K | ground-truth events (SoccerNet-Caption format, `gt_gameTime` = corrected time) |
 | `dataset/organized_data/.../<match>/kb.json` (2 benchmark matches) | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
-| `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark |
+| `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark: `benchmark-0926.jsonl` and the 0929 version (per-match files) |
+| `dataset/streamingqa/part1_1001/` | 224K | streaming-QA benchmark, 1001 version (per-match files; `scripts/run_qa.py --benchmark`) |
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | jersey reader (`perception.jersey.model`) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
 | `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 830M | raw perception cache (`matchlive/common/cache.py`), written by `scripts/run_perception.py`, read by every later stage |
-| `cache/api/<call id>.json` | 21M | cached Gemini answers: event analyzer, arbiter and QA calls of the recorded runs |
+| `cache/api.tar.gz` → `cache/api/<call id>.json` | 2.3M (14M unpacked) | cached model answers: event analyzer, arbiter and QA calls of the recorded runs (and of other experiments). An archive because a Hugging Face folder holds at most 10,000 files; the `cache/api/` folder in the HF repo is an older subset of it. After new runs, re-pack with `tar -czf api.tar.gz --exclude='*.tmp' -C cache api` and upload it as `cache/api.tar.gz` |
 
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
