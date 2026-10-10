@@ -121,7 +121,7 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
             same = matching(outside, event)
             if same and parts and all(p.player_id or p.track_key in named_tracks for p in parts):
                 writes += [("reject", j.obs_id) for _, j in mem.justifications[same[0]]
-                           if j.kind == "observation" and j.obs_id not in mem.rejected]
+                           if j.kind != "verdict" and mem.holds(j)]
                 writes.append(("add_event", event))
             else:
                 # Supporting an entry, the verdict's participants join it like any agreeing claim's.

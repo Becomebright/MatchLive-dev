@@ -120,9 +120,10 @@ class MatchMemory:
                 self._rebuild(p["entry_id"])
         elif op.kind == "reject_observation":
             self.rejected.setdefault(p["obs_id"], op.t_known)
-            # The participants the rejected observation brought leave the entries it supported.
+            # The participants the rejected observation brought (or a re-check of it) leave the
+            # entries it supported.
             for entry_id, js in self.justifications.items():
-                if any(j.obs_id == p["obs_id"] and j.participants for _, j in js):
+                if any(p["obs_id"] in (j.obs_id, j.of) and j.participants for _, j in js):
                     self._rebuild(entry_id)
         elif op.kind == "open_case":
             self.cases[p["case_id"]] = Case(p["case_id"], tuple(p["members"]), p["constraint"],
@@ -152,7 +153,7 @@ class MatchMemory:
         e = self.written[entry_id]
         parts = list(e.participants)
         for _, j in self.justifications[entry_id]:
-            if j.obs_id in self.rejected:
+            if not self.holds(j):
                 continue
             for q in j.participants:
                 i = next((k for k, part in enumerate(parts) if part.role == q.role), None)
@@ -166,12 +167,22 @@ class MatchMemory:
 
     def status(self, entry_id: str) -> str:
         """"confirmed" | "pending" | "retracted", from the entry's justifications (DESIGN.md §5.2)."""
-        holding = [j for _, j in self.justifications[entry_id] if j.obs_id not in self.rejected]
+        holding = [j for _, j in self.justifications[entry_id] if self.holds(j)]
         if not holding:
             return "retracted"
         if any(j.sufficient for j in holding) and not self.open_cases(entry_id):
             return "confirmed"
         return "pending"
+
+    def holds(self, j: Justification) -> bool:
+        """A justification holds while its observation is not rejected — and, for a re-check,
+        while the observation it re-checks is not rejected either (DESIGN.md §5.2)."""
+        return j.obs_id not in self.rejected and j.of not in self.rejected
+
+    def rejected_at(self, j: Justification) -> Time | None:
+        """When the justification stopped holding (None while it holds)."""
+        times = [self.rejected[o] for o in (j.obs_id, j.of) if o in self.rejected]
+        return min(times) if times else None
 
     def open_cases(self, entry_id: str) -> list[str]:
         """The open cases this entry is a member of; while there are any it is pending."""
@@ -245,7 +256,7 @@ def _decode_entry(d: Mapping[str, Any]) -> Event | Identity:
 def _decode_justification(d: Mapping[str, Any]) -> Justification:
     # Logs written before justifications carried participants have none.
     return Justification(d["obs_id"], d["kind"], d["sufficient"],
-                         tuple(map(_decode_participant, d.get("participants", ()))))
+                         tuple(map(_decode_participant, d.get("participants", ()))), d.get("of"))
 
 
 def _decode_participant(p: Mapping[str, Any]) -> Participant:

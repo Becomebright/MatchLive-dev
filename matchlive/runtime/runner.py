@@ -190,7 +190,7 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
 
     Every case the consistency check opens goes to the arbiter at once (event-level
     conflicts escalate at k=1, DESIGN.md §6.4); its verdict takes effect at the case's
-    opening time + the arbiter's latency, unless that is past the deadline. The arbiter is
+    opening time + the arbiter's latency, however late (DESIGN.md §6.6). The arbiter is
     `decide(mem, case, packet, t) -> Decision | None` — by default the API arbiter; None
     leaves the case open (e.g. to evaluate the consistency check alone); scripts/run_arbiter.py
     passes cached subagent verdicts. With loop.arbiter off, the newest belief of each case is
@@ -219,8 +219,9 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
 
     # One timeline: analyzer answers arriving, and verdicts taking effect.
     order = itertools.count()
+    # A re-check's row (a run_live run with loop.recheck) is no window: it is not replayed here.
     queue = [((half, r["window"][1] + r["latency"]), next(order), "answer", (half, r))
-             for half, rows in results.items() for r in rows if "candidates" in r]
+             for half, rows in results.items() for r in rows if "candidates" in r and "recheck" not in r]
     queue.append(((3, 0.0), next(order), "whistle", None))       # after the final whistle
     heapq.heapify(queue)
     n_seen, records = 0, []
@@ -257,9 +258,6 @@ def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[
             records.append(record)
             if decision.verdict is None:
                 continue
-            if decision.latency > config["arbiter"]["deadline"]:
-                record["void"] = "past the deadline"
-                continue
             heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
     return mem, records
 
@@ -282,14 +280,19 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
       - at the end of every fixed window, the event analyzer's request is built from the
         frames and identities seen so far and sent through `client` (APIClient); its answer
         takes effect at the window end + the measured latency;
+      - with loop.recheck, an entry still pending on one live sighting once the next window's
+        answer has arrived is re-checked once: the analyzer, unchanged, on a window centred on
+        that sighting (DESIGN.md §6.4), unless that window is one of the fixed ones; the last
+        window of a half has no next one, so its lone sightings are not re-checked;
       - answers go through the consistency check; every event-level case goes to the arbiter
         at once, a perception case once it has `off_roster_k` sources; the verdict takes effect
-        at the case's opening + the arbiter's summed latency, unless past the deadline.
+        at the case's opening + the arbiter's summed latency, however late.
     The model calls are synchronous, so the wall time is the sum of their latencies; what memory
     holds at each match time is what a live run with the same latencies would have held.
 
     Writes to `out_dir`: ops.jsonl (the memory log — everything the QA reads), windows.jsonl
-    (each window's call and candidates), cases.json (each arbitrated case), and
+    (each window's call and candidates; a re-check's row has "recheck": <entry id> and "of":
+    the sighting it re-checks), cases.json (each arbitrated case), and
     perceived_half<h>.pkl (second -> the frame as the analyzer was told about it, at the
     sampled seconds, for the QA's current view). Returns memory.
 
@@ -309,6 +312,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     from matchlive.events.analyzer import Candidate, build_request, parse_candidates
     from matchlive.events.consistency import ConsistencyChecker
     from matchlive.events.windows import fixed_windows
+    from matchlive.memory.types import Event
     from matchlive.runtime.evidence import EvidenceTools
 
     loop, ev, prematch = config["loop"], config["events"], match.prematch
@@ -327,11 +331,17 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     queue: list = []
     order = itertools.count()
     n_seen = 0                         # cases already handled (case ids are handed out in order)
+    # Re-checks (loop.recheck, DESIGN.md §6.4): a lone live sighting is re-checked once the
+    # window after its own has had its say.
+    after: dict[tuple, tuple] = {}     # (half, window) -> (half, the window after it)
+    done: set[tuple] = set()           # (half, window) whose answer has arrived, or that failed
+    rechecked: set[str] = set()        # entries re-checked already (once each)
+    halves: dict[int, dict] = {}       # half -> the sampled frames a re-check is built from
 
     def arbitrate(case, t, opened=None, void=None):
         """Send `case` to the arbiter at match time t. `void` is why its previous verdict was void:
-        the arbiter is told and rules once more (DESIGN.md §6.6), within the deadline counted from
-        the case's opening (`opened`)."""
+        the arbiter is told and rules once more (DESIGN.md §6.6). `opened` is when the case opened.
+        There is no deadline: a valid verdict takes effect when it arrives, however late."""
         if not loop["arbiter"]:
             reject_newest(mem, t, case.case_id)
             return
@@ -359,10 +369,6 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
             if not void:
                 heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "retry",
                                        (case, opened, decision.note)))
-            return
-        elapsed = t[1] - opened[1] + decision.latency if t[0] == opened[0] else float("inf")
-        if elapsed > config["arbiter"]["deadline"]:
-            record["void"] = "past the deadline"
             return
         heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
 
@@ -397,11 +403,100 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                     arbitrate(case, when, opened, note)
                 continue
             checker.tick(mem, when)
+            if kind == "recheck":
+                half, eid, r = payload
+                # The first candidate that is a sighting of the entry joins it (any() stops there);
+                # the rest of the footage was analysed by the regular windows already.
+                seen = any(checker.recheck(mem, when, eid, half, tuple(r["window"]), Candidate.from_dict(c),
+                                           f"obs:{r['call_id']}#{i}", c["players"])
+                           for i, c in enumerate(r["candidates"]))
+                print(f"  re-check {eid}: {'seen again' if seen else 'not seen'}", flush=True)
+                settle(when)
+                continue
             half, r = payload
             for i, c in enumerate(r["candidates"]):
                 checker.propose(mem, when, half, tuple(r["window"]), Candidate.from_dict(c),
                                 f"obs:{r['call_id']}#{i}", c["players"])
             settle(when)
+            done.add((half, tuple(r["window"])))
+            if loop["recheck"] and loop["consistency"]:
+                for eid in due():
+                    recheck(eid, when)
+
+    def due():
+        """The entries to re-check now: pending on a single live sighting (not a replay), whose
+        next window's answer has arrived (or failed) without seeing it again."""
+        out = []
+        for eid, e in mem.entries.items():
+            if not isinstance(e, Event) or eid in rechecked:
+                continue
+            js = [j for _, j in mem.justifications[eid]]
+            if (len(js) != 1 or js[0].kind != "observation" or js[0].sufficient or js[0].obs_id not in sources
+                    or mem.status(eid) != "pending"):
+                continue
+            src = sources[js[0].obs_id]
+            if src["candidate"]["replay"] and loop["replay"]:
+                continue
+            half = e.t_interval[0][0]
+            if after.get((half, tuple(src["window"]))) in done:
+                out.append(eid)
+        return out
+
+    def analyze(half, window, **extra):
+        """One event-analysis call on `window` of `half` (DESIGN.md §6.3), its request built from the
+        frames and identities seen so far. The candidates carry the player behind each participant
+        track as the model was told (after `corrupt`, in the error-injection experiment). The call
+        is logged to windows.jsonl with `extra` (a re-check's entry) and its observations are
+        registered. Returns the logged row; out of retries, the row has "error" instead."""
+        h = halves[half]
+        shown = [(s, h["images"][s]) for s in h["grid"] if window[0] <= s < window[1] and s in h["images"]]
+        request = build_request(half, window, shown, h["perceived"], prematch, ev["sample_fps"], ev["ask_confidence"])
+        # The player behind each track as last seen in the window — what the model was told.
+        players_of = {(half, *tr.key): tr.player_id
+                      for s, _ in shown for tr in h["perceived"].get(s, ((), None, ()))[0] if tr.player_id}
+        try:
+            result = client.generate(request.parts, json_output=True)
+        except NoAPIKey:
+            raise
+        except Exception as e:  # noqa: BLE001 — out of retries: live, this call is simply lost
+            r = {"half": half, "window": window, **extra, "error": f"{type(e).__name__}: {e}"}
+        else:
+            cands = [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
+                     for c in parse_candidates(result.text, request)]
+            if corrupt is not None:
+                cands = corrupt(half, window, cands)
+            r = {"half": half, "window": window, "call_id": result.call_id, "model": result.model,
+                 "latency": result.latency, "cached": result.cached, **extra, "candidates": cands}
+            for i, c in enumerate(cands):
+                sources[f"obs:{result.call_id}#{i}"] = {"window": window, "candidate": c}
+        windows_log.write(json.dumps(r) + "\n")
+        windows_log.flush()
+        return r
+
+    def recheck(eid, t):
+        """Re-check entry `eid` at match time t (DESIGN.md §6.4): the analyzer, unchanged, on a
+        window of the same length centred on its sighting; the answer takes effect at t + the
+        measured latency. A window that is one of the fixed ones was analysed already: asking
+        again would be the same request, so the entry is not re-checked."""
+        rechecked.add(eid)
+        e = mem.entries[eid]
+        half = e.t_interval[0][0]
+        obs_id = mem.justifications[eid][0][1].obs_id
+        second, h = sources[obs_id]["candidate"]["second"], halves[half]
+        length = ev["window_seconds"]
+        w0 = max(0.0, min(second - length / 2, h["grid"][-1] - length))
+        window = (w0, w0 + length)
+        if window in h["windows"]:
+            print(f"  re-check {eid} {e.type} at {half}H {second:.0f}s: skipped, a fixed window", flush=True)
+            return
+        # Logged whole: only a candidate that is a sighting of this entry will join it.
+        r = analyze(half, window, recheck=eid, of=obs_id)
+        if "error" in r:
+            print(f"  re-check {eid} {e.type} at {half}H {second:.0f}s failed: {r['error']}", flush=True)
+            return
+        print(f"  re-check {eid} {e.type} at {half}H {second:.0f}s: {len(r['candidates'])} candidates, "
+              f"{r['latency']:.1f}s{' cached' if r['cached'] else ''}", flush=True)
+        heapq.heappush(queue, ((t[0], t[1] + r["latency"]), next(order), "recheck", (half, eid, r)))
 
     for half in (1, 2):
         if until is not None and half > until[0]:
@@ -421,6 +516,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         perceived: dict[float, tuple] = {}        # sampled second -> frame_view()
         reads_seen: set[str] = set()
         roster, confirmed, version = squad, {}, None
+        halves[half] = {"images": images, "perceived": perceived, "grid": grid, "windows": set(windows)}
+        after.update({(half, a): (half, b) for a, b in zip(windows, windows[1:])})
 
         def fire(window):
             """Window over: build the analyzer's request from what has been seen, call the model,
@@ -437,34 +534,24 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                     if ok:
                         images[wanted[video["pos"]]] = image
                 video["pos"] += 1
-            shown = [(s, images[s]) for s in grid if window[0] <= s < window[1] and s in images]
-            request = build_request(half, window, shown, perceived, prematch, ev["sample_fps"], ev["ask_confidence"])
-            # The player behind each track as last seen in the window — what the model was told.
-            players_of = {(half, *tr.key): tr.player_id
-                          for s, _ in shown for tr in perceived.get(s, ((), None, ()))[0] if tr.player_id}
-            try:
-                result = client.generate(request.parts, json_output=True)
-            except NoAPIKey:
-                raise
-            except Exception as e:  # noqa: BLE001 — out of retries: live, this window is simply lost
-                windows_log.write(json.dumps({"half": half, "window": window, "error": f"{type(e).__name__}: {e}"}) + "\n")
-                print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {e}", flush=True)
+            r = analyze(half, window)
+            if "error" in r:
+                print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {r['error']}", flush=True)
+                done.add((half, tuple(window)))
                 return
-            cands = [{**c.__dict__, "players": [players_of.get(key) for _, key in c.participants]}
-                     for c in parse_candidates(result.text, request)]
-            if corrupt is not None:
-                cands = corrupt(half, window, cands)
-            r = {"half": half, "window": window, "call_id": result.call_id, "model": result.model,
-                 "latency": result.latency, "cached": result.cached, "candidates": cands}
-            windows_log.write(json.dumps(r) + "\n")
-            windows_log.flush()
-            print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s {len(cands)} candidates, {result.latency:.1f}s"
-                  f"{' cached' if result.cached else ''}", flush=True)
-            for i, c in enumerate(cands):
-                sources[f"obs:{result.call_id}#{i}"] = {"window": window, "candidate": c}
-            heapq.heappush(queue, ((half, window[1] + result.latency), next(order), "answer", (half, r)))
-            # The next window starts `window_overlap` s before this one ends.
-            for s in [s for s in images if s < window[1] - ev["window_overlap"]]:
+            print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s {len(r['candidates'])} candidates, {r['latency']:.1f}s"
+                  f"{' cached' if r['cached'] else ''}", flush=True)
+            heapq.heappush(queue, ((half, window[1] + r["latency"]), next(order), "answer", (half, r)))
+            if loop["recheck"] and loop["consistency"]:
+                # A re-check (DESIGN.md §6.4) is sent once a sighting's window and the one after it
+                # have answered, on frames from half a window before the sighting's window: keep
+                # them back to the earliest window still waiting for either answer.
+                waiting = next(a for a in windows if not {(half, a), after.get((half, a))} <= done)
+                horizon = waiting[0] - ev["window_seconds"] / 2
+            else:
+                # The next window starts `window_overlap` s before this one ends.
+                horizon = window[1] - ev["window_overlap"]
+            for s in [s for s in images if s < horizon]:
                 del images[s]
 
         w = 0
@@ -501,6 +588,12 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
             fire(windows[w])
             w += 1
         cap.release()
+        if until is None or until[0] > half:
+            # Everything of this half lands before the next half starts ((half, s) < (half + 1, 0)),
+            # re-checks included; then its frames are no longer needed.
+            advance((half, float("inf")))
+            images.clear()
+            del halves[half]
         with open(out_dir / f"perceived_half{half}.pkl", "wb") as f:
             pickle.dump(perceived, f)
 

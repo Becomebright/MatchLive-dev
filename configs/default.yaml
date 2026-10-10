@@ -28,6 +28,11 @@ loop:
   # On: a candidate the analyzer saw in a replay gets the interval [window start - W, window
   # end] (DESIGN.md §6.5). Off: it is taken as a live sighting at the second it was seen.
   replay: true
+  # On: an entry seen only once, live, and not seen again by the next window is re-checked once
+  # by the same analyzer on a window centred on that sighting; a re-check that sees it again
+  # suffices (DESIGN.md §6.4). Not an independent source — a precision-for-recall trade.
+  # Off: a single source leaves the entry pending.
+  recheck: true
   # On: identity votes only among the players memory has on the pitch and keeps the confirmed
   # identity entries; a number worn by nobody on the pitch that names an off-pitch player is
   # evidence for the consistency check. Off: votes over the whole squad (v2).
@@ -105,9 +110,8 @@ api:
   endpoint: configs/api.local.yaml
   model: gemini-3.8-flash
   cache: api
-  switch_after: 5                      # failures of one request in a row before the next endpoint takes over
   speech_cache: tts                    # text-to-speech audio, under paths.cache
-  max_attempts: 8                      # transient errors (503 overload, 429 quota) are retried with backoff (5 s doubling, at most max_backoff)
+  max_attempts: 8                      # a failed attempt is retried on the next endpoint at once; after a round on all of them, with backoff (5 s doubling, at most max_backoff)
   max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
 
@@ -146,7 +150,6 @@ arbiter:
   max_requests: 2                      # tool requests served per round
   max_frames: 16                       # frames per get_frames
   crops: 8                             # pictures per get_track_crops
-  deadline: 300                        # s of match time: a verdict arriving later is void (the case stays open)
   context: 90                          # s around the members within which other events are listed
   # Verdicts from the arbiter subagent (scripts/run_arbiter.py) have no measured API latency;
   # they take effect this many seconds after the case opened (DESIGN.md §6.10 allows a fixed value).

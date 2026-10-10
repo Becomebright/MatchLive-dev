@@ -38,6 +38,8 @@ def main():
     for name in args.match or MATCHES:
         source = load_config()["paths"]["outputs"] / "live" / name / args.source
         rows = [json.loads(line) for line in open(source / "windows.jsonl")]
+        # Windows only: a re-check's row (loop.recheck) is no window of its own.
+        rows = [r for r in rows if "recheck" not in r]
         results = {h: [r for r in rows if r["half"] == h and "candidates" in r] for h in (1, 2)}
         confs = [c["confidence"] for r in rows for c in r.get("candidates", [])]
         print(f"{name}: {len(confs)} candidates, {sum(c is None for c in confs)} without a confidence")

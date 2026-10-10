@@ -77,7 +77,7 @@ def replacement(mem: Any, eid: str) -> str | None:
     observations and adds the fuller event, all at the time the case closes (DESIGN.md §6.6,
     arbiter/verdict.py). What was said of the old entry still holds through the new one."""
     e = mem.entries[eid]
-    when = [mem.rejected.get(j.obs_id) for _, j in mem.justifications[eid]]
+    when = [mem.rejected_at(j) for _, j in mem.justifications[eid]]
     if not when or None in when:
         return None                                    # not retracted
     t = max(when)
@@ -444,7 +444,7 @@ class CommentaryPolicy:
         """(half, second, replay only): the median live sighting, else the middle of the interval."""
         mem = view.mem
         seen = [self.sources[j.obs_id]["candidate"] for _, j in mem.justifications[r.entry_id]
-                if j.obs_id in self.sources and j.obs_id not in mem.rejected]
+                if j.obs_id in self.sources and mem.holds(j)]
         live = sorted(c["second"] for c in seen if not c["replay"])
         (half, lo), (_, hi) = r.event.t_interval
         if live:
@@ -455,7 +455,7 @@ class CommentaryPolicy:
         """What made an entry certain, as a commentator would put it: a second look (the arbiter's
         check) or the replay; nothing when two sightings simply agree."""
         mem = view.mem
-        holding = [j for _, j in mem.justifications[eid] if j.obs_id not in mem.rejected]
+        holding = [j for _, j in mem.justifications[eid] if mem.holds(j)]
         if any(j.kind == "verdict" for j in holding):
             return "a second look at the pictures confirms it"
         if any(self.sources.get(j.obs_id, {}).get("candidate", {}).get("replay") for j in holding):

@@ -11,8 +11,9 @@ Text-to-speech for the commentary (speech()) goes through the same endpoints and
 same way, as MP3 files.
 
 The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
-(configs/api.local.yaml, gitignored: keys never go into the repo), in order: the next one takes
-over when the current one runs out of quota or keeps failing. They are only needed when a call
+(configs/api.local.yaml, gitignored: keys never go into the repo), in order: a failed request is
+retried on the next one at once (that request only), and the next one takes over for good when
+the current one runs out of quota. They are only needed when a call
 misses the cache. Without them a miss raises NoAPIKey, so a replay from a shared cache either
 reproduces the cached run or stops.
 """
@@ -62,7 +63,7 @@ class APIClient:
         self.cache_dir = cache_dir / config["cache"]
         self.speech_dir = cache_dir / config.get("speech_cache", "tts")
         self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
-        self._current = 0                        # the endpoint in use; the next takes over when it gives out
+        self._out: set[int] = set()              # endpoints out of quota: no request goes to them again
         self._lock = threading.Lock()
 
     def generate(self, parts: Sequence[str | bytes], json_output: bool = False) -> APIResult:
@@ -143,18 +144,23 @@ class APIClient:
         return out
 
     def _call(self, call):
-        """Run `call(sdk client)` against the endpoints: transient errors (overload, timeouts) are
-        retried with backoff on the same endpoint; an endpoint out of quota, or failing this request
-        `switch_after` times in a row, hands over to the next one at once. Returns (what `call`
-        returned, the successful attempt's latency — all a cached replay has to go on — and the
-        client that answered)."""
+        """Run `call(sdk client)` against the endpoints. A request starts on the first endpoint still
+        in quota; a failed attempt (overload, timeout, an empty answer) is retried on the next one
+        at once — for this request only. Once every endpoint has failed it in turn, it waits
+        (backoff) before the next round. An endpoint out of quota is dropped for good, for every
+        request. Returns (what `call` returned, the successful attempt's latency — all a cached
+        replay has to go on — and the client that answered)."""
         with self._lock:
             # The SDK clients, created once even when several threads call at the same time.
             if self._clients is None:
                 self._clients = self._connect()
-        failures = 0
+        n = len(self._clients)
+        step = 0
         for attempt in range(self.config.get("max_attempts", 1)):
-            current = self._current
+            with self._lock:
+                # The endpoints still in quota, in order (all of them if none is: nothing else to try).
+                live = [i for i in range(n) if i not in self._out] or list(range(n))
+            current = live[step % len(live)]
             client = self._clients[current]
             try:
                 t0 = time.perf_counter()
@@ -163,16 +169,16 @@ class APIClient:
             except Exception as e:  # noqa: BLE001 — any API failure is retried the same way
                 if attempt + 1 == self.config.get("max_attempts", 1):
                     raise
-                failures += 1
                 print(f"api retry {attempt + 1} ({client.base_url.host}): {type(e).__name__}: {str(e)[:120]}", flush=True)
-                if len(self._clients) > 1 and (_out_of_quota(e) or failures >= self.config.get("switch_after", 5)):
+                if _out_of_quota(e) and current not in self._out:
                     with self._lock:
-                        if self._current == current:        # another thread may have switched already
-                            self._current = (current + 1) % len(self._clients)
-                            print(f"api: switching to {self._clients[self._current].base_url}", flush=True)
-                    failures = 0
-                    continue
-                time.sleep(min(5 * 2 ** attempt, self.config.get("max_backoff", 120)))
+                        self._out.add(current)
+                    print(f"api: {client.base_url} is out of quota, no longer used", flush=True)
+                    continue        # the same step now lands on the next endpoint still in quota
+                step += 1
+                if step % len(live) == 0:
+                    # Every endpoint has failed this request once more: back off before the next round.
+                    time.sleep(min(5 * 2 ** (step // len(live) - 1), self.config.get("max_backoff", 120)))
 
     def _connect(self) -> list:
         """One SDK client per endpoint of the local file `api.endpoint`, in its order."""
