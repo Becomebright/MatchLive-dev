@@ -49,7 +49,8 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - The LLM API is reached through OpenAI-compatible endpoints (the `openai` SDK), named in
   `configs/api.local.yaml`, which is gitignored so the keys never enter the repo. They are used
-  in order; the next takes over when one runs out of quota or keeps failing (`api.switch_after`):
+  in order: a failed request is retried on the next one at once (that request only), and the next
+  takes over for good when one runs out of quota:
   ```yaml
   endpoints:
     - base_url: https://.../v1

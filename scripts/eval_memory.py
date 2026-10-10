@@ -24,7 +24,8 @@ the matches (both benchmark matches by default):
      phase 4, which has no per-track ground truth on these matches);
   6. what made entries sufficient — the second justification of each entry that has one: a
      sighting from the overlap of two adjacent windows (the same frames seen twice), from
-     another window, from a replay, the foul / free-kick pairing, or a verdict — and how many of
+     another window, from a replay, the foul / free-kick pairing, a re-check of a lone sighting
+     (loop.recheck), or a verdict — and how many of
      the entries each one confirmed are true.
 
 An entry matches a true event of its type (a shot entry may also match a goal), half and team
@@ -225,8 +226,8 @@ def evaluate(config: dict[str, Any], match: Match, run_dir: Path) -> dict[str, A
             continue
         first = sources.get(js[0].obs_id)
         this = sources.get(second.obs_id)
-        if second.kind == "verdict":
-            how = "verdict"
+        if second.kind in ("verdict", "recheck"):
+            how = second.kind
         elif first is None or this is None:
             how = "other"
         elif this[1]["type"] != e.type:
@@ -382,7 +383,7 @@ def main():
               f"{pct(f.get('off_pitch', 0), f.get('identified', 0))}% of identified ({f.get('off_pitch', 0)})")
 
     print("\n6. The second justification that made entries sufficient: entries confirmed that way (share true)")
-    kinds = ("overlap", "other window", "replay", "pairing", "verdict", "other")
+    kinds = ("overlap", "other window", "replay", "pairing", "recheck", "verdict", "other")
     print(f"{'run':24s} " + " ".join(f"{k:>16s}" for k in kinds))
     for run, r in rows.items():
         c = r.get("confirmers", {})

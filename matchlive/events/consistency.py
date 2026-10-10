@@ -17,7 +17,9 @@ A foul and the free kick that restarts play after it confirm each other: each on
 observation is added as a justification of the other, since two independent sources agree.
 
 A justification is sufficient (DESIGN.md §6.4) when a second, independent source agrees with
-the entry; a single sighting leaves it pending. Who did it is not part of this: the players
+the entry, or when a re-check of a lone live sighting sees it again (`recheck()`, loop.recheck:
+the same analyzer on the same footage — not independent, a precision-for-recall trade); a
+single sighting otherwise leaves it pending. Who did it is not part of this: the players
 behind an event come from the Identity entries, which carry their own status.
 
 Status is never written here, and cases are never closed here (that is the arbiter's call,
@@ -79,14 +81,7 @@ class ConsistencyChecker:
             if player:
                 self._identity(mem, t_known, key, player)
 
-        # loop.replay off: the replay flag is ignored and the sighting is taken as live.
-        if cand.replay and self.replay:
-            interval = ((half, max(0.0, window[0] - self.replay_lookback)), (half, window[1]))
-        else:
-            margin = self.live_margin.get(cand.type, self.live_margin["default"])
-            interval = ((half, max(0.0, cand.second - margin)), (half, cand.second + margin))
-        event = Event(cand.type, cand.team, interval,
-                      tuple(Participant(role, track_key=key) for role, key in cand.participants))
+        event = self._event(half, window, cand)
 
         if not self.enabled:
             return mem.add_entry(t_known, event, Justification(obs_id, "observation", True))
@@ -101,19 +96,8 @@ class ConsistencyChecker:
                 return matches[0]
             return mem.add_entry(t_known, event, Justification(obs_id, "observation", True))
         if len(matches) == 1:
-            eid = matches[0]
-            # Two claims about one event disagree when they name different identified players
-            # in the same role.
-            track_players = mem.track_players()
-            old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
-            clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
-            # Claims that agree pool their participants: who this sighting saw joins the entry
-            # (DESIGN.md §6.4 step 1), so a player only the second window identified is not lost.
-            mem.add_justification(t_known, eid, Justification(obs_id, "observation", not clash,
-                                                              () if clash else event.participants))
-            if clash:
-                mem.open_case(t_known, [eid, obs_id], "claims_disagree", [obs_id])
-            return eid
+            self._join(mem, t_known, matches[0], event, obs_id, "observation", None)
+            return matches[0]
 
         # A single sighting never suffices on its own (DESIGN.md §6.4).
         eid = mem.add_entry(t_known, event, Justification(obs_id, "observation", False))
@@ -121,6 +105,48 @@ class ConsistencyChecker:
             mem.open_case(t_known, [*matches, eid], "ambiguous_match", [obs_id])
         self._check_new(mem, t_known, eid, events)
         return eid
+
+    def recheck(self, mem: MatchMemory, t_known: Time, eid: str, half: int, window: tuple[float, float],
+                cand: Candidate, obs_id: str, players: Sequence[str | None]) -> bool:
+        """One candidate of the re-check of entry `eid` (DESIGN.md §6.4): if it is a sighting of
+        that entry by step 1's rule, it joins the entry as a "recheck" justification, sufficient
+        unless it names other players. Returns whether it joined. Whatever else the re-check saw
+        is not proposed: the regular windows have analysed that footage already."""
+        event = self._event(half, window, cand)
+        if not matching([(eid, mem.entries[eid])], event):
+            return False
+        for (_, key), player in zip(cand.participants, players):
+            if player:
+                self._identity(mem, t_known, key, player)
+        # It re-checks the entry's lone sighting, and holds only while that does (DESIGN.md §5.2).
+        self._join(mem, t_known, eid, event, obs_id, "recheck", mem.justifications[eid][0][1].obs_id)
+        return True
+
+    def _event(self, half: int, window: tuple[float, float], cand: Candidate) -> Event:
+        """The event a candidate claims, with its event-time interval (DESIGN.md §5.2, §6.5)."""
+        # loop.replay off: the replay flag is ignored and the sighting is taken as live.
+        if cand.replay and self.replay:
+            interval = ((half, max(0.0, window[0] - self.replay_lookback)), (half, window[1]))
+        else:
+            margin = self.live_margin.get(cand.type, self.live_margin["default"])
+            interval = ((half, max(0.0, cand.second - margin)), (half, cand.second + margin))
+        return Event(cand.type, cand.team, interval,
+                     tuple(Participant(role, track_key=key) for role, key in cand.participants))
+
+    def _join(self, mem: MatchMemory, t_known: Time, eid: str, event: Event, obs_id: str, kind: str,
+              of: str | None) -> None:
+        """A sighting of entry `eid` becomes one more justification of it (step 1)."""
+        # Two claims about one event disagree when they name different identified players
+        # in the same role.
+        track_players = mem.track_players()
+        old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
+        clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
+        # Claims that agree pool their participants: who this sighting saw joins the entry
+        # (DESIGN.md §6.4 step 1), so a player only the second window identified is not lost.
+        mem.add_justification(t_known, eid, Justification(obs_id, kind, not clash,
+                                                          () if clash else event.participants, of))
+        if clash:
+            mem.open_case(t_known, [eid, obs_id], "claims_disagree", [obs_id])
 
     def _identity(self, mem: MatchMemory, t_known: Time, key: tuple, player: str) -> None:
         claims = [(eid, e) for eid, e in mem.entries.items()

@@ -135,7 +135,7 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
                             for p, pid in zip(e.participants, resolve_players(e, track_players))) or "no participants"
             lines.append(f"- {m}: {e.type}, team {e.team}, half {h} {clock(lo)}–{clock(hi)} [{mem.status(m)}]; {who}")
         for t, j in mem.justifications[m]:
-            state = "rejected" if j.obs_id in mem.rejected else ("sufficient" if j.sufficient else "insufficient")
+            state = "rejected" if not mem.holds(j) else ("sufficient" if j.sufficient else "insufficient")
             lines.append(f"    · {j.obs_id} ({j.kind}, {state}): {_observation(j.obs_id, observations, prematch)}")
     # Independent sources merged into the case after it opened and not shown above (e.g. more
     # tracks reading the same off-pitch player's number).

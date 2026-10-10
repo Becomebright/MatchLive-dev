@@ -214,3 +214,56 @@ def test_consistency_off_is_the_v2_baseline():
     checker.tick(mem, (1, 1000))
     assert not mem.cases
     assert mem.at((1, 200)).score["home"] == 2                  # the replay counted as a goal
+
+
+def recheck(feed, eid, t_known, type, team, second, **players):
+    """A re-check's candidate for entry `eid` (DESIGN.md §6.4)."""
+    feed.n += 1
+    parts = tuple((role, (1, 1, track)) for role, (track, _) in players.items())
+    cand = Candidate(type, team, second, parts, (second,), False)
+    return feed.checker.recheck(feed.mem, (1, t_known), eid, 1, (second - 15, second + 15), cand,
+                                f"obs:call{feed.n}#0", [p for _, p in players.values()])
+
+
+def test_recheck_that_sees_a_lone_sighting_again_confirms_it():
+    feed = setup(); mem = feed.mem
+    c = feed(130, "corner", "home", 100)
+    assert mem.status(c) == "pending"
+    assert recheck(feed, c, 200, "corner", "home", 101)
+    assert mem.status(c) == "confirmed"
+    assert [j.kind for _, j in mem.justifications[c]] == ["observation", "recheck"]
+
+
+def test_recheck_that_sees_something_else_leaves_it_pending():
+    feed = setup(); mem = feed.mem
+    c = feed(130, "corner", "home", 100)
+    assert not recheck(feed, c, 200, "shot", "home", 100)          # another type
+    assert not recheck(feed, c, 200, "corner", "away", 100)        # the other team
+    assert not recheck(feed, c, 200, "corner", "home", 140)        # another time
+    assert mem.status(c) == "pending" and len(mem.justifications[c]) == 1
+    assert len(mem.entries) == 1                                # nothing else it saw is proposed
+
+
+def test_recheck_naming_another_player_disagrees():
+    feed = setup(); mem = feed.mem
+    y = feed(130, "yellow_card", "home", 100, player=(7, "h1"))
+    assert recheck(feed, y, 200, "yellow_card", "home", 101, player=(8, "h2"))
+    [case] = cases(mem, "claims_disagree")
+    assert y in case.members and mem.status(y) == "pending"
+
+
+def test_recheck_falls_with_the_sighting_it_rechecks():
+    # Liverpool match, 1H 17:08: a replay of Lovren's goal taken for a new live goal; the arbiter
+    # rejected that sighting, and a re-check of the same replay arrived after. The re-check
+    # looked at the same footage, so it cannot keep the goal standing (DESIGN.md §5.2).
+    feed = setup(); mem = feed.mem
+    g = feed(130, "goal", "away", 100)
+    mem.reject_observation((1, 150), "obs:call1#0")
+    assert recheck(feed, g, 170, "goal", "away", 101)
+    assert mem.status(g) == "retracted"
+    assert mem.at((1, 200)).score == {"home": 0, "away": 0}
+    # And the other way round: rejected after the re-check confirmed it.
+    c = feed(230, "corner", "home", 200)
+    assert recheck(feed, c, 260, "corner", "home", 201) and mem.status(c) == "confirmed"
+    mem.reject_observation((1, 290), f"obs:call{feed.n - 1}#0")
+    assert mem.status(c) == "retracted"
