@@ -21,7 +21,10 @@ class Match:
             # The whole file, post-match facts included (final score, clip list): for evaluation
             # scripts only. The live system reads `prematch`.
             self.metadata: dict[str, Any] = json.load(f)
-        self.prematch: dict[str, Any] = prematch(self.metadata)
+        # The pre-match knowledge base, if built (scripts/build_kb.py).
+        kb_path = self.dir / "kb.json"
+        kb = json.loads(kb_path.read_text()) if kb_path.exists() else None
+        self.prematch: dict[str, Any] = prematch(self.metadata, kb)
         # Only matches in the streaming-QA benchmark have offsets.
         self.benchmark_offsets: dict[int, int] | None = config["benchmark_offsets"].get(name)
 
@@ -37,12 +40,15 @@ class Match:
         return (2, float(timestamp - start2)) if timestamp >= start2 else (1, float(timestamp))
 
 
-def prematch(metadata: Mapping[str, Any]) -> dict[str, Any]:
+def prematch(metadata: Mapping[str, Any], kb: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What is known before kick-off — the only match information the live system gets
     (DESIGN.md §6.8): the team names, kit colours, which goal each team defends in each half,
     and the two squads (name, shirt number, starting or substitute, and a starter's position
-    from the announced formation). Everything else in metadata.json (the final score, the
-    clip list, nationality, referee, venue, ...) stays out."""
+    from the announced formation). Under "background", for the commentary: the formations,
+    venue, referee, round, date and nationalities from metadata.json, and the pre-match
+    knowledge base `kb` (scripts/build_kb.py) — each side's manager, captain and facts (the
+    table and form going in, signings, ...), and each player's facts. Everything else in
+    metadata.json (the final score, the clip list, the attendance, ...) stays out."""
     # home_team_side is the side of the main camera's picture the home team defends in the
     # first half (checked on all six local halves: at kick-off the home kit stands on that
     # side); the teams swap ends at half-time.
@@ -53,11 +59,25 @@ def prematch(metadata: Mapping[str, Any]) -> dict[str, Any]:
         players.append({k: p[k] for k in ("hash", "team_side", "name", "short_name", "long_name",
                                           "jersey_number", "starting")}
                        | {"position": _position(metadata["tactics"][p["team_side"]], p["position"])})
+    kb = kb or {"teams": {}, "players": {}}
+    background = {
+        "venue": metadata["venue"][0].split(" (")[0] if metadata.get("venue") else None,   # "Stamford Bridge"
+        "referee": metadata["referee"][0] if metadata.get("referee") else None,             # "Atkinson M."
+        "round": metadata.get("round"),
+        "date": metadata["game_date"].split(" - ")[0],                                      # "16/09/2016"
+        "formations": {side: f.removeprefix("1-") for side, f in metadata["tactics"].items()},   # "4-2-3-1"
+        "nationality": {p["hash"]: p["country"] for p in metadata["players"]},
+        # Each fact as a sentence; its source and quote stay in kb.json.
+        "teams": {side: {"manager": (t.get("manager") or {}).get("text"), "captain": (t.get("captain") or {}).get("text"),
+                         "facts": [f["text"] for f in t.get("facts", [])]} for side, t in kb["teams"].items()},
+        "players": {h: [f["text"] for f in p.get("facts", [])] for h, p in kb["players"].items()},
+    }
     return {
         "teams": dict(metadata["teams"]),
         "jersey_colors": dict(metadata["jersey_colors"]),
         "sides": {1: {"home": first, "away": other}, 2: {"home": other, "away": first}},
         "players": players,
+        "background": background,
     }
 
 

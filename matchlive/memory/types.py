@@ -67,12 +67,15 @@ class Justification:
     # overturns it by rejecting that id. The observation itself lives in the API or
     # perception cache; only its id is kept here.
     obs_id: str
-    kind: str                                   # "observation" | "verdict"
+    kind: str                                   # "observation" | "recheck" | "verdict"
     sufficient: bool                            # enough on its own to confirm (DESIGN.md §6.4)
     # The participants a matching observation names (DESIGN.md §6.4 step 1). While it holds,
     # they join the entry: a role the entry lacks is added, a role it has gets the track as an
     # alternate. Rejecting the observation takes them out again.
     participants: tuple[Participant, ...] = ()
+    # A re-check (kind "recheck", DESIGN.md §6.4) looks at the same footage again, so it is no
+    # independent source: it holds only while the observation it re-checks (`of`) does too.
+    of: str | None = None
 
 
 @dataclass

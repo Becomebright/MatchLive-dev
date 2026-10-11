@@ -32,7 +32,10 @@ def main():
     run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
     config = load_config(overrides=run_overrides(run_dir))
     match = Match(config, args.match)
-    windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
+    rows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
+    # Re-checks (loop.recheck) are logged with the windows; counted apart here.
+    windows = [w for w in rows if "recheck" not in w]
+    rechecks = [w for w in rows if "recheck" in w]
     ok = [w for w in windows if "error" not in w]
     lat = np.array([w["latency"] for w in ok])
     cands = [c for w in ok for c in w["candidates"]]
@@ -41,6 +44,9 @@ def main():
           f"candidates {len(cands)} ({sum(c['replay'] for c in cands)} flagged replay)")
 
     mem = MatchMemory(match.prematch["players"], log_path=run_dir / "ops.jsonl", cascade=config["loop"]["cascade"])
+    if rechecks:
+        seen = sum(any(j.kind == "recheck" for _, j in js) for js in mem.justifications.values())
+        print(f"re-checks {len(rechecks)}: saw the entry again {seen}, failed {sum('error' in w for w in rechecks)}")
     by_type = defaultdict(Counter)
     for eid, e in mem.entries.items():
         if isinstance(e, Event):

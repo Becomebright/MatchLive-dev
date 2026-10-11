@@ -49,7 +49,8 @@ pip install onnx              # only for scripts/export_jersey_onnx.py (torch ->
 - Use `opencv-python` (not `-headless`): `trackers` depends on it, and two cv2 builds would clash.
 - The LLM API is reached through OpenAI-compatible endpoints (the `openai` SDK), named in
   `configs/api.local.yaml`, which is gitignored so the keys never enter the repo. They are used
-  in order; the next takes over when one runs out of quota or keeps failing (`api.switch_after`):
+  in order: a failed request is retried on the next one at once (that request only), and the next
+  takes over for good when one runs out of quota:
   ```yaml
   endpoints:
     - base_url: https://.../v1
@@ -84,6 +85,7 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 |---|---|---|
 | `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (3 matches) | 5.3G | every pipeline run (`paths.dataset`) |
 | `dataset/organized_data/.../2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-caption_with_gt.json` | 58K | ground-truth events (SoccerNet-Caption format, `gt_gameTime` = corrected time) |
+| `dataset/organized_data/.../<match>/kb.json` (2 benchmark matches) | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
 | `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark: `benchmark-0926.jsonl` and the 0929 version (per-match files) |
 | `dataset/streamingqa/part1_1001/` | 224K | streaming-QA benchmark, 1001 version (per-match files; `scripts/run_qa.py --benchmark`) |
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
@@ -108,9 +110,23 @@ elsewhere:
 The match videos come from SoccerNet (under its NDA) and DINOv3 weights are under Meta's license,
 so the repo stays private.
 
-## 4. SoccerNet Game State Reconstruction (public; evaluation only)
+## 4. SoccerNet labels and Game State Reconstruction (evaluation only)
 
-Only the `scripts/eval_*_gsr.py` scripts need it. The test split is the public
+**Event labels of our matches.** `scripts/ground_truth.py` (and the scripts built on it:
+`eval_memory.py`, `inject_errors.py`, `eval_commentary.py`) reads each match's SoccerNet labels
+from its folder: `Labels-v2.json` (action spotting: every goal, card, substitution, shot, corner,
+foul, offside, free kick, with team and time) and `Labels-caption.json` (commentary naming the
+players). They come from the `SoccerNet/SN-Labels` dataset repo on Hugging Face (accept its terms
+on the website first), laid out as league/season/game, so they drop straight into place:
+```bash
+hf download SoccerNet/SN-Labels --repo-type dataset --local-dir dataset/organized_data \
+    --include "england_epl/2015-2016/2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United/Labels-*.json" \
+    --include "england_epl/2016-2017/2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool/Labels-*.json" \
+    --include "england_epl/2015-2016/2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-*.json"
+```
+The live system never reads them (`DESIGN.md` §6.8).
+
+**SoccerNet-GSR.** Only the `scripts/eval_*_gsr.py` scripts need it. The test split is the public
 `SoccerNet/SN-GSR-2024` dataset repo:
 ```bash
 hf download SoccerNet/SN-GSR-2024 test.zip --repo-type dataset --local-dir dataset/SoccerNetGS/gamestate-2024

@@ -130,7 +130,7 @@ class QATools:
         """(half, second, exact): the median second at which the analyzer saw it live, or the
         middle of its interval (verdicts add events there); a replay sighting only bounds it."""
         seen = sorted(self.sources[j.obs_id]["candidate"]["second"] for _, j in past.justifications[eid]
-                      if j.obs_id in self.sources and j.obs_id not in past.rejected
+                      if j.obs_id in self.sources and past.holds(j)
                       and not (self.replay and self.sources[j.obs_id]["candidate"]["replay"]))
         (half, lo), (_, hi) = e.t_interval
         if seen:
@@ -231,7 +231,7 @@ class QATools:
             return Evidence(f"error: no event {entry} (known by now)")
         lines = [f"{entry} [{past.status(entry)}] rests on:"]
         for _, j in past.justifications[entry]:
-            state = "rejected" if j.obs_id in past.rejected else "holds"
+            state = "holds" if past.holds(j) else "rejected"
             lines.append(f"- {self._source(past, j.obs_id)} [{state}]")
         cases = past.open_cases(entry)
         if cases:

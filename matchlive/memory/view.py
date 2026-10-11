@@ -131,7 +131,7 @@ class View:
             "entry": mem.entries[entry_id],
             "status": mem.status(entry_id),
             "justifications": [{"obs_id": j.obs_id, "kind": j.kind, "sufficient": j.sufficient,
-                                "added": t, "rejected": mem.rejected.get(j.obs_id)}
+                                "added": t, "rejected": mem.rejected_at(j)}
                                for t, j in mem.justifications[entry_id]],
             "open_cases": mem.open_cases(entry_id),
         }
