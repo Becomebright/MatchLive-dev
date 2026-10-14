@@ -29,6 +29,7 @@ match caches (matchlive.common.cache.perception_key).
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections import defaultdict
 
@@ -84,7 +85,12 @@ def kit_colours(label_path, images, gt):
 
 
 def main():
-    config = load_config()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="override a config setting, e.g. perception.jersey.model=/path/to/jersey.onnx")
+    args = ap.parse_args()
+
+    config = load_config(overrides=args.set)
     runner = MatchRunner(config)
     confidence = config["perception"]["detection"]["confidence"]
     out_dir = config["paths"]["outputs"] / "gsr_eval"

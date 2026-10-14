@@ -35,9 +35,11 @@ HEIGHT_BUCKETS = [0, 40, 60, 80, 100, 150, 1000]
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stride", type=int, default=10, help="use every n-th frame")
+    ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="override a config setting, e.g. perception.jersey.model=/path/to/jersey.onnx")
     args = ap.parse_args()
 
-    config = load_config()
+    config = load_config(overrides=args.set)
     reader = JerseyReader(config["perception"]["jersey"], config["paths"]["checkpoints"], config["paths"]["cache"])
     print("providers:", reader.providers)
 

@@ -40,7 +40,9 @@ conda activate matchlive
 # without configs/api.local.yaml (a fresh clone has none) nothing but the cache can be used
 pytest tests/                               # 54 tests
 M="2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool"
-python scripts/run_live.py --match "$M"     # ~3 min
+# the recorded runs used the previous jersey checkpoint (docs/results.md §30); the raw perception
+# cache is keyed by the model file, so point the replay at it
+python scripts/run_live.py --match "$M" --set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx   # ~3 min
 python scripts/eval_live.py --match "$M"    # 221 windows, 24 cases, score in memory 1-2
 python scripts/run_qa.py --match "$M" --mode tools       # ~2 min: 0.923
 python scripts/run_qa.py --match "$M" --mode dump_log    # seconds: 0.783

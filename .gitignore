@@ -3,6 +3,7 @@ dataset/
 checkpoints/
 cache/
 outputs/
+training/
 # the paper draft is its own git repo (synced with Overleaf)
 latex/
 

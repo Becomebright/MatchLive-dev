@@ -16,6 +16,7 @@ Checks, on real player crops (SoccerNet-GSR ground-truth boxes):
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import cv2
@@ -76,11 +77,20 @@ def compare(name: str, ref: np.ndarray, test: np.ndarray) -> None:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checkpoint", help="export this safetensors checkpoint (e.g. training/runs/<name>/jersey.safetensors) "
+                                         "instead of the deployed one, to --out, and skip the checks below")
+    ap.add_argument("--out", help="ONNX file to write with --checkpoint")
+    args = ap.parse_args()
+
     config = load_config()
     ckpt_dir = config["paths"]["checkpoints"]
     backbone_dir = ckpt_dir / "dinov3-convnext-tiny"
     ckpt_path = ckpt_dir / config["perception"]["jersey"]["checkpoint"]
     onnx_path = ckpt_dir / config["perception"]["jersey"]["model"]
+    if args.checkpoint:      # an experiment's weights: never overwrite the deployed ONNX
+        ckpt_path, onnx_path = REPO_ROOT / args.checkpoint, REPO_ROOT / args.out
+        backbone_dir = REPO_ROOT / "training/jersey_train_pack/tmp/dinov3-convnext-tiny"   # config only
 
     # 1. Strict load. The backbone is built from its config alone: the jersey checkpoint
     # carries every backbone tensor, so DINOv3's own pretrained weights are never read.
@@ -98,6 +108,8 @@ def main():
         opset_version=17, dynamo=False,
     )
     print("exported:", onnx_path)
+    if args.checkpoint:
+        return
 
     crops = gsr_crops(256)
     model = model.cuda()
