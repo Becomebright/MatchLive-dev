@@ -170,8 +170,8 @@ perception:
     cut_threshold: 0.3
 
   jersey:
-    checkpoint: jersey_dinov3_convnext_tiny-20_matches.safetensors   # torch weights, export source
-    model: jersey_dinov3_convnext_tiny-20_matches.onnx         # exported by scripts/export_jersey_onnx.py
+    checkpoint: jersey_dinov3_convnext_tiny-20_matches_gsr.safetensors   # torch weights, export source
+    model: jersey_dinov3_convnext_tiny-20_matches_gsr.onnx         # exported by scripts/export_jersey_onnx.py
     providers: [tensorrt, cuda, cpu]
     fp16: true
     trt_cache: trt/jersey_fp16

@@ -38,6 +38,7 @@ pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-p
     transformers safetensors openai pyyaml tqdm pytest "tensorrt-cu13==10.16.*"
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
+pip install pyarrow datasets accelerate tensorboard   # only for retraining the jersey reader (§7)
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
@@ -89,20 +90,23 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark: `benchmark-0926.jsonl` and the 0929 version (per-match files) |
 | `dataset/streamingqa/part1_1001/` | 224K | streaming-QA benchmark, 1001 version (per-match files; `scripts/run_qa.py --benchmark`) |
 | `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
-| `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | jersey reader (`perception.jersey.model`) |
+| `checkpoints/jersey_dinov3_convnext_tiny-20_matches_gsr.onnx` | 112M | jersey reader (`perception.jersey.model`), retrained on 20 matches + SoccerNet-GSR (`docs/results.md` §30) |
+| `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | the previous jersey reader: the recorded runs and the shared perception caches were made with it, so replaying them needs `--set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx` (README) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
 | `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 830M | raw perception cache (`matchlive/common/cache.py`), written by `scripts/run_perception.py`, read by every later stage |
 | `cache/api.tar.gz` → `cache/api/<call id>.json` | 2.3M (14M unpacked) | cached model answers: event analyzer, arbiter and QA calls of the recorded runs (and of other experiments). An archive because a Hugging Face folder holds at most 10,000 files; the `cache/api/` folder in the HF repo is an older subset of it. After new runs, re-pack with `tar -czf api.tar.gz --exclude='*.tmp' -C cache api` and upload it as `cache/api.tar.gz` |
 
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
-change to any of them makes the pipeline look for a new file. `cache/trt/` (TensorRT engines) is
+change to any of them makes the pipeline look for a new file. The shared perception caches were
+written with the previous jersey ONNX, so under the default config (the `_gsr` model) they are not
+found and the first run perceives from scratch on a GPU; the override above keeps them usable. `cache/trt/` (TensorRT engines) is
 specific to the GPU and is never shared.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
 elsewhere:
-- `checkpoints/jersey_dinov3_convnext_tiny-20_matches.safetensors` and
-  `checkpoints/dinov3-convnext-tiny/` (backbone config): the torch source for the jersey ONNX,
+- `checkpoints/jersey_dinov3_convnext_tiny-20_matches_gsr.safetensors` (and the previous
+  `...-20_matches.safetensors`) and `checkpoints/dinov3-convnext-tiny/` (backbone config): the torch source for the jersey ONNX,
   needed by `scripts/export_jersey_onnx.py` and by v2's jersey reader in `scripts/compare_v2.py`.
 - `checkpoints/rfdetr-l.pth`: the torch source of `rfdetr-l.onnx`.
 - `checkpoints/jersey_dinov3_convnext_tiny-101.pt`: the superseded jersey checkpoint (`docs/results.md`).
@@ -133,6 +137,10 @@ hf download SoccerNet/SN-GSR-2024 test.zip --repo-type dataset --local-dir datas
 unzip -q dataset/SoccerNetGS/gamestate-2024/test.zip -d dataset/SoccerNetGS/test   # -> test/SNGS-*/
 rm dataset/SoccerNetGS/gamestate-2024/test.zip                                  # optional, 8.3G
 ```
+The train (9.8G) and valid (11G) splits are only needed to retrain the jersey reader (§7); download them
+the same way (`train.zip`, `valid.zip`). The three splits cover different matches (`game_id` in each
+`Labels-GameState.json`: train 4, 6, 9; valid 2, 3, 5; test 7, 8, 11). Use Python's `zipfile` if `unzip`
+is not installed.
 
 ## 5. Optional: v2 reference implementation
 
@@ -151,3 +159,38 @@ conda run -n matchlive python scripts/run_perception.py \
 ```
 It prints the cache path, detection/track counts and per-stage ms/frame; compare the timing with
 `docs/results.md`.
+
+## 7. Optional: retraining the jersey reader
+
+Only needed to redo `docs/results.md` §30. Needs several GPUs for a reasonable time (2 x H100 with batch
+256 each took 28 minutes for 3 epochs; 4 x H100 at 128 each should take about half), the SoccerNet-GSR train / valid / test splits (§4) and the training pack
+(the 20 matches' crops with VLM labels, the DINOv3 backbone and the original training script):
+```bash
+hf download Becomebright/MatchLive-assets training/jersey_train_pack.tar --repo-type dataset --local-dir .
+tar -xf training/jersey_train_pack.tar -C training        # -> training/jersey_train_pack/tmp/
+```
+`training/` is git-ignored. Then, from the repo root (every script prints what it wrote):
+```bash
+python scripts/prepare_jersey_labels.py                    # per-box label table of GSR train + valid
+python scripts/read_jersey_labels.py                       # read the usable boxes with the current reader
+python scripts/read_jersey_labels.py --reason null_track   # ... and those of tracks without a number
+python scripts/build_jersey_training_data.py               # crops + the two 5000-row validation sets
+PYTHONPATH=. NCCL_NET=Socket torchrun --nproc_per_node=4 scripts/train_jersey.py \
+    --name e3_r2_aug --epochs 3 --gsr-repeat 2 --augment --batch-size 128
+python scripts/export_jersey_onnx.py --checkpoint training/runs/e3_r2_aug/jersey.safetensors \
+    --out training/runs/e3_r2_aug/jersey_e3_r2_aug.onnx
+python scripts/eval_jersey_val.py --model training/runs/e3_r2_aug/jersey_e3_r2_aug.onnx
+python scripts/eval_jersey_gsr.py --set perception.jersey.model=$PWD/training/runs/e3_r2_aug/jersey_e3_r2_aug.onnx
+python scripts/eval_identity_gsr.py --set perception.jersey.model=$PWD/training/runs/e3_r2_aug/jersey_e3_r2_aug.onnx
+```
+Things that bite on this machine:
+- **`NCCL_NET=Socket`** for multi-GPU training: the shell's default `NCCL_NET=gIB` plugin does not
+  initialise here, and a single node needs no network plugin. `torchrun` also takes `--name`, not `--run`
+  (it would abbreviate it to its own `--run-path`).
+- **Give every exported ONNX its own file name.** The TensorRT engine cache (`cache/trt/`) is keyed by file
+  name and graph, not by weights: two models both called `jersey.onnx` share one engine and silently
+  give identical results.
+- After a kernel upgrade `nvidia-smi` can fail until the matching driver module package is installed
+  (`linux-modules-nvidia-580-server-open-<kernel version>`); `nvidia-fabricmanager` failing with
+  "Nothing to..." is harmless on this VM (no NVSwitch is visible).
+- `--set` on the GSR eval scripts takes an absolute ONNX path (`checkpoints/` is prepended to relative ones).
