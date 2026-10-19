@@ -240,9 +240,9 @@ mem.at(event_time, known_by=None)    # known_by 默认等于 event_time
 ### 6.1 感知（从 v2 移植，并做以下修改）
 | 子模块 | 来源 | 修改点 |
 |---|---|---|
-| `detection` | v2 | 模型用 RF-DETR-L；ONNX 优先用 TensorRT EP（FP16，引擎缓存在 `cache/trt/`），不可用时依次退回 CUDA、CPU |
+| `detection` | v2 | 模型用重训的 RF-DETR-2XL（`rfdetr-2xl-1019`，结果见 `results.md` §31）；ONNX 优先用 TensorRT EP（FP16，引擎缓存在 `cache/trt/`），不可用时依次退回 CUDA、CPU |
 | `tracking` | v2 | 换用 BoT-SORT（带镜头运动补偿；SoccerNet-GSR 上 HOTA 65.5，ByteTrack 63.6）；镜头切换时显式调用 reset。**球员和门将共用一个跟踪器**，角色按轨迹投票（v2 按角色分开跟踪，检测类别一跳变同一个人就被拆散；GSR 上门将有 18% 被检测成外场球员，合并后 ID 切换少 15%）。**只跟踪球员和门将**：球每帧取得分最高、超过阈值的检测框，不跟踪（GSR 上跟踪不优于逐帧取最高分，BoT-SORT 会把球的召回率降到 0.30） |
-| `jersey` | v2 | 检查点用 `jersey_dinov3_convnext_tiny-20_matches`，导出 ONNX，TensorRT FP16 推理（和检测相同）；`predict_batch` 返回**完整的 101 维概率**，用于判断"号码是否清楚"以及做候选约束；修复 v2 在 transformers 5.x 下检查点加载失败的问题（细节见 CLAUDE.md 的移植注意事项） |
+| `jersey` | v2 | 检查点用 `jersey_dinov3_convnext_tiny-20_matches_gsr`（20 场 + SoccerNet-GSR 重训，结果见 `results.md` §30），导出 ONNX，TensorRT FP16 推理（和检测相同）；`predict_batch` 返回**完整的 101 维概率**，用于判断"号码是否清楚"以及做候选约束；修复 v2 在 transformers 5.x 下检查点加载失败的问题（细节见 CLAUDE.md 的移植注意事项） |
 | `identity` | v2 | (a) 在场名单作为**可推翻约束**：只在场上球员里投票；读到名单以外的号码时**不丢弃**，而是作为证据交给一致性检查；(b) 同一帧内一个球员最多对应一条轨迹（匈牙利算法，硬约束）；(c) 遵守记忆里已确认的身份条目；(d) 修复 v2 把门将球衣颜色当成第 3、4 支队伍的问题（见 CLAUDE.md 的移植注意事项）；(e) 队伍颜色改用去掉草地和皮肤后的平均 LAB 颜色（v2 的主色 k-means 会丢掉白色、黑色球衣），外场球员的颜色按两簇在线聚类判定队伍，metadata 球衣颜色太粗，只用来给两簇命名主队或客队 |
 | `shots`（新） | — | 只做镜头切换检测（相邻帧颜色直方图差），供跟踪器重置。**镜头类型和回放检测搁置**：本地比赛里，延迟回放前后有台标转场，但进球后的即时回放是直接叠化进去的，没有台标；台标模板这类做法依赖具体的转播包装，换一场比赛就可能失效。后面的模块都不依赖它们，回放改由事件分析判断（§6.5） |
 | `calibration`（可选，阶段 6 以后） | NBJW（MIT 许可） | 只在远景镜头上跑，而且要判断结果是否可信；每隔几帧跑一次，中间插值 |
@@ -464,7 +464,7 @@ matchlive/
 ---
 
 ## 9. 运行资源约束
-- 本机 GPU 是 RTX 4060 Ti 8GB：够跑检测（RF-DETR-L，TensorRT FP16）和号码识别的推理，但跑不了本地 VLM。这也是"先用 API"的现实前提。
+- 本机 GPU 是 RTX 4060 Ti 8GB：够跑检测（RF-DETR-2XL，TensorRT FP16）和号码识别的推理，但跑不了本地 VLM。这也是"先用 API"的现实前提。
 - 需要微调或本地部署 VLM 时，要另找服务器，届时再修订本节。
 
 ---
