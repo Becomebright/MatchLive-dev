@@ -13,7 +13,7 @@ ground truth:
           centre; precision over frames with a selected ball, recall over frames with a
           GT ball.
 
-Raw detector candidates are cached in outputs/gsr_eval/rfdetr-l_raw.npy (one row per query
+Raw detector candidates are cached in outputs/gsr_eval/<detector model name>_raw.npy, e.g. rfdetr-l_raw.npy (one row per query
 with score > 0.01: image_id, l, t, w, h, score, detector class id) and computed with our
 detector if missing; each frame's detections are rebuilt from them with the detector's own
 filter (`to_detections`), so the cache serves any confidence threshold.
@@ -28,6 +28,7 @@ import argparse
 import json
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -43,9 +44,14 @@ GSR_DIR = REPO_ROOT / "dataset/SoccerNetGS/test"
 LABEL_PATHS = sorted(GSR_DIR.glob("SNGS-*/Labels-GameState.json"))
 
 
+def raw_candidates_path(config, out_dir):
+    """Where the raw candidates of the configured detector are cached (one file per model)."""
+    return out_dir / f"{Path(config['perception']['detection']['model']).stem}_raw.npy"
+
+
 def load_raw_candidates(config, out_dir):
     """Raw candidates of every GSR test frame: rows (image_id, l, t, w, h, score, class id)."""
-    path = out_dir / "rfdetr-l_raw.npy"
+    path = raw_candidates_path(config, out_dir)
     if path.exists():
         return np.load(path)
     paths = config["paths"]
@@ -87,9 +93,11 @@ def main():
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override one tracker parameter of the chosen algorithm")
     ap.add_argument("--name", help="run name (default: the algorithm)")
+    ap.add_argument("--config-set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="override a config setting, e.g. perception.detection.model=rfdetr-2xl-1019.onnx")
     args = ap.parse_args()
 
-    config = load_config()
+    config = load_config(overrides=args.config_set)
     tracking = config["perception"]["tracking"]
     tracking["algorithm"] = args.algorithm
     for item in args.set:
