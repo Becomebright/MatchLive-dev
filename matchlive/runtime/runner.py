@@ -134,24 +134,44 @@ class MatchRunner:
         return arrays, {"ms_per_frame": {k: 1000 * v / n for k, v in timing.items()}, "total_ms": total_ms}
 
 
-def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.ndarray],
-                   keep: set[int]) -> dict[int, tuple[list[Track], tuple | None, list[str | None]]]:
-    """Replay identity voting over a half's raw perception cache, streaming in frame order
-    (identities at frame t use only frames <= t), and keep frames `keep`:
-    frame_idx -> (tracks with team / player_id, the key of the track nearest the ball or
-    None, the number read clearly off each track in this frame or None). Frames without
-    tracks or detections are absent.
+def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.ndarray], fps: float,
+                   frame_of: dict[float, int], windows: list[tuple[float, float]]
+                   ) -> dict[tuple[float, float], dict[float, tuple[list[Track], tuple | None, list[str | None]]]]:
+    """Replay identity voting over a half's raw perception cache and resolve it window by window
+    (DESIGN.md §6.1 identity (f)): the votes are cast frame by frame, and when a window ends, the
+    window's sampled frames (`frame_of`: sampled second -> frame, those with window start <=
+    second < window end) are resolved with the votes up to that point, so a track is named from
+    the whole window's reads and not from the reads before each frame.
 
-    Votes over the whole squad without memory (the §7 loop.state_to_perception baseline);
-    run_live() does the same with the on-pitch roster and identities from memory.
+    Returns window -> {second -> (tracks with team / player_id, the key of the track nearest the
+    ball or None, the number read clearly off each track in this frame or None)}. Seconds
+    shared by two windows appear in both, each as that window saw it; frames without tracks or
+    detections are absent. Votes over the whole squad without memory (the §7
+    loop.state_to_perception baseline); run_live() does the same with the on-pitch roster and
+    identities from memory.
     """
     roster = roster_index(match.prematch["players"])
     resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.prematch["jersey_colors"]))
+    sampled = set(frame_of.values())
+    raw: dict[int, tuple] = {}            # sampled frame -> (tracks, jersey, detections) of it
     out = {}
+
+    def close(window):
+        out[window] = {}
+        for s, f in frame_of.items():
+            if window[0] <= s < window[1] and f in raw:
+                tracks, jersey, det = raw[f]
+                out[window][s] = frame_view(config, resolver.resolve(tracks, roster, {}), jersey, det)
+
+    pending = list(windows)
     for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
-        tracks = resolver.update(frame_idx, tracks, jersey, color, roster, confirmed={})
-        if frame_idx in keep:
-            out[frame_idx] = frame_view(config, tracks, jersey, det)
+        while pending and pending[0][1] <= frame_idx / fps:
+            close(pending.pop(0))
+        resolver.vote(frame_idx, tracks, jersey, color)
+        if frame_idx in sampled:
+            raw[frame_idx] = (tracks, jersey, det)
+    for window in pending:
+        close(window)
     return out
 
 
@@ -277,9 +297,10 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         votes only among the players memory has on the pitch at that moment, keeps memory's
         confirmed identity entries, and reports a number worn by nobody on the pitch that names
         an off-pitch player as evidence (consistency.off_roster_read);
-      - at the end of every fixed window, the event analyzer's request is built from the
-        frames and identities seen so far and sent through `client` (APIClient); its answer
-        takes effect at the window end + the measured latency;
+      - at the end of every fixed window, the window's frames are given their identities from
+        the votes of the whole window (IdentityResolver.resolve, DESIGN.md §6.1 identity (f)),
+        the event analyzer's request is built from them and sent through `client` (APIClient);
+        its answer takes effect at the window end + the measured latency;
       - with loop.recheck, an entry still pending on one live sighting once the next window's
         answer has arrived is re-checked once: the analyzer, unchanged, on a window centred on
         that sighting (DESIGN.md §6.4), unless that window is one of the fixed ones; the last
@@ -294,7 +315,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     (each window's call and candidates; a re-check's row has "recheck": <entry id> and "of":
     the sighting it re-checks), cases.json (each arbitrated case), and
     perceived_half<h>.pkl (second -> the frame as the analyzer was told about it, at the
-    sampled seconds, for the QA's current view). Returns memory.
+    sampled seconds, for the QA's current view; a second in two windows as the later one saw
+    it, which is known only from that window's end). Returns memory.
 
     For the error-injection experiment (DESIGN.md §10 phase 4): `corrupt(half, window, candidates)`
     returns the candidates the analyzer is taken to have answered instead (e.g. without a
@@ -513,7 +535,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         cap = cv2.VideoCapture(str(match.video_path(half)))
         video = {"pos": 0}
         images: dict[float, np.ndarray] = {}      # sampled frames a current or later window still needs
-        perceived: dict[float, tuple] = {}        # sampled second -> frame_view()
+        perceived: dict[float, tuple] = {}        # sampled second -> frame_view(), as of the last window it was in
+        raw: dict[float, tuple] = {}              # sampled second -> (tracks, jersey, detections), kept for the windows that hold it
         reads_seen: set[str] = set()
         roster, confirmed, version = squad, {}, None
         halves[half] = {"images": images, "perceived": perceived, "grid": grid, "windows": set(windows)}
@@ -534,6 +557,12 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                     if ok:
                         images[wanted[video["pos"]]] = image
                 video["pos"] += 1
+            # Identity of the window's frames from the votes of the whole window (DESIGN.md §6.1
+            # identity (f)); the analyzer is only shown them now. The next window shares its first
+            # `window_overlap` s with this one and resolves them again with more votes.
+            for s, (tracks, jersey, det) in raw.items():
+                if window[0] <= s < window[1]:
+                    perceived[s] = frame_view(config, resolver.resolve(tracks, roster, confirmed), jersey, det)
             r = analyze(half, window)
             if "error" in r:
                 print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {r['error']}", flush=True)
@@ -571,6 +600,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                 on = set(view.on_field["home"] + view.on_field["away"])
                 roster = roster_index([p for p in prematch["players"] if p["hash"] in on])
                 confirmed = {key[1:]: pid for key, pid in mem.track_players().items() if key[0] == half}
+            if frame_idx in wanted:
+                raw[wanted[frame_idx]] = (tracks, jersey, det)
             tracks = resolver.update(frame_idx, tracks, jersey, color, roster, confirmed)
             if feedback and loop["consistency"]:
                 for key, player in resolver.off_roster_reads({tr.key: tr.team for tr in tracks}, roster, squad):
@@ -582,8 +613,6 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                     settle((half, second))
                     if case_id:
                         arbitrate(mem.cases[case_id], (half, second))
-            if frame_idx in wanted:
-                perceived[wanted[frame_idx]] = frame_view(config, tracks, jersey, det)
         while w < len(windows) and (until is None or (half, windows[w][1]) <= until):
             fire(windows[w])
             w += 1
