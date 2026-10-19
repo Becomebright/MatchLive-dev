@@ -38,7 +38,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from trackers.eval import box_iou
 
-from eval_tracking_gsr import LABEL_PATHS, load_raw_candidates   # sibling script (scripts/ is on sys.path)
+from eval_tracking_gsr import LABEL_PATHS, load_raw_candidates, raw_candidates_path   # sibling script (scripts/ is on sys.path)
 from matchlive.common.cache import iter_frames, load_perception, perception_key, save_perception
 from matchlive.common.config import load_config
 from matchlive.perception.detection import to_detections
@@ -112,7 +112,7 @@ def main():
         images = sorted(labels["images"], key=lambda im: im["file_name"])
         gt = ground_truth(labels)
 
-        key = perception_key(config, [label_path, out_dir / "rfdetr-l_raw.npy"])
+        key = perception_key(config, [label_path, raw_candidates_path(config, out_dir)])
         path = out_dir / "perception" / f"{name}_{key}.npz"
         if not path.exists():
             detections = {}

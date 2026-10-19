@@ -39,6 +39,7 @@ pip install "onnxruntime-gpu[cuda,cudnn]" "trackers==2.6.1" supervision opencv-p
 pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and tests/
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 pip install pyarrow datasets accelerate tensorboard   # only for retraining the jersey reader (§7)
+pip install pycocotools       # only for scripts/eval_detection_gsr.py (detection AP)
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
@@ -89,7 +90,8 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `dataset/organized_data/.../<match>/kb.json` (2 benchmark matches) | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
 | `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark: `benchmark-0926.jsonl` and the 0929 version (per-match files) |
 | `dataset/streamingqa/part1_1001/` | 224K | streaming-QA benchmark, 1001 version (per-match files; `scripts/run_qa.py --benchmark`) |
-| `checkpoints/rfdetr-l.onnx` | 122M | detector (`perception.detection.model`) |
+| `checkpoints/rfdetr-2xl-1019.onnx` | 470M | detector (`perception.detection.model`), the retrained RF-DETR-2XL (`docs/results.md` §31) |
+| `checkpoints/rfdetr-l.onnx` | 122M | the previous detector: the recorded runs and the shared perception caches were made with it (replay with `--set perception.detection.model=rfdetr-l.onnx perception.detection.trt_cache=trt/rfdetr-l_fp16`, one `--set` each) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches_gsr.onnx` | 112M | jersey reader (`perception.jersey.model`), retrained on 20 matches + SoccerNet-GSR (`docs/results.md` §30) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | the previous jersey reader: the recorded runs and the shared perception caches were made with it, so replaying them needs `--set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx` (README) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
@@ -99,8 +101,8 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
 change to any of them makes the pipeline look for a new file. The shared perception caches were
-written with the previous jersey ONNX, so under the default config (the `_gsr` model) they are not
-found and the first run perceives from scratch on a GPU; the override above keeps them usable. `cache/trt/` (TensorRT engines) is
+written with the previous detector and jersey ONNX, so under the default config (`rfdetr-2xl-1019` and the `_gsr` model) they are not
+found and the first run perceives from scratch on a GPU; the overrides above (jersey and detector) keep them usable. `cache/trt/` (TensorRT engines) is
 specific to the GPU and is never shared.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
@@ -109,6 +111,9 @@ elsewhere:
   `...-20_matches.safetensors`) and `checkpoints/dinov3-convnext-tiny/` (backbone config): the torch source for the jersey ONNX,
   needed by `scripts/export_jersey_onnx.py` and by v2's jersey reader in `scripts/compare_v2.py`.
 - `checkpoints/rfdetr-l.pth`: the torch source of `rfdetr-l.onnx`.
+- `checkpoints/rfdetr-2xl-1019.pth` (505M, on HF): the torch source of `rfdetr-2xl-1019.onnx`. Converted in a separate venv so the `matchlive` env keeps its package versions:
+  `python3 -m venv ~/.venvs/rfdetr-export && ~/.venvs/rfdetr-export/bin/pip install "rfdetr[plus]==1.11.2" onnx onnxsim onnxscript`, then
+  `RFDETR2XLarge(pretrain_weights="checkpoints/rfdetr-2xl-1019.pth", num_classes=4).export(output_dir=...)` writes `rfdetr-2xlarge.onnx`; copy it to `checkpoints/rfdetr-2xl-1019.onnx`.
 - `checkpoints/jersey_dinov3_convnext_tiny-101.pt`: the superseded jersey checkpoint (`docs/results.md`).
 
 The match videos come from SoccerNet (under its NDA) and DINOv3 weights are under Meta's license,
