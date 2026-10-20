@@ -77,9 +77,11 @@ commentary:
   history: 10                          # the last lines shown to the generator, so it does not repeat itself
   words_per_second: 2.5                # speaking rate: a line keeps the commentator busy this long
   # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
-  # 30-90 s memory needs to learn of an event and the generation call. A line is shown with the
-  # video at (ready time - output_delay), but never before the event it speaks of is on screen.
-  output_delay: 60
+  # 30-90 s memory needs to learn of an event and the generation call. 60 s was too short for the
+  # slowest tenth of the lines (p90 about 80 s, results §22/§25), hence 120 s (2026-10-20). A line is
+  # shown with the video at (ready time - output_delay), but never before the event it speaks of is
+  # on screen.
+  output_delay: 120
   # The commentator's voice (text-to-speech through the api endpoints): the line's generator picks
   # a tone, which picks the delivery instruction.
   voice:
