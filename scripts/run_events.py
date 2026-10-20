@@ -62,8 +62,8 @@ def main():
     # Sample times on one grid for the whole half, so overlapping windows share frames.
     grid = [k * step for k in range(int(meta["n_frames"] / fps / step) + 1)]
     frame_of = {s: int(round(s * fps)) for s in grid}
-    resolved = resolve_frames(config, match, arrays, set(frame_of.values()))
-    perceived = {s: resolved[f] for s, f in frame_of.items() if f in resolved}
+    # Identities of each window's frames from the votes of the whole window (DESIGN.md §6.1 identity (f)).
+    perceived_of = resolve_frames(config, match, arrays, fps, frame_of, windows)
 
     client = APIClient(config["api"], config["paths"]["cache"])
     out_path = config["paths"]["outputs"] / "events" / args.match / f"half{args.half}.jsonl"
@@ -86,6 +86,7 @@ def main():
                         frames[wanted[frame_idx]] = image
                 frame_idx += 1
             shown = [(s, frames[s]) for s in grid if window[0] <= s < window[1] and s in frames]
+            perceived = perceived_of[window]
             request = build_request(args.half, window, shown, perceived, match.prematch, ev["sample_fps"])
             # The player behind each track as last seen in the window — what the model was
             # told — recorded next to the candidates for scoring attribution.

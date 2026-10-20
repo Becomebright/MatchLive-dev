@@ -22,6 +22,7 @@ from matchlive.arbiter.agent import Evidence
 from matchlive.common.match import Match
 from matchlive.common.types import Track
 from matchlive.events.analyzer import clock, labelled_frames
+from matchlive.events.windows import fixed_windows
 from matchlive.memory.store import MatchMemory
 from matchlive.memory.types import Event, Time
 from matchlive.runtime.evidence import EvidenceTools
@@ -43,14 +44,19 @@ class QATools:
             self.video._load(half)
         # How long the first half ran, to reach back across half-time ("the last 10 minutes").
         self.first_half = max(perceived[1])
-        # Each track's identity as voted over time: (half, shot, track) -> ([second], [(team, player)]),
-        # so a frame from the past can be labelled with what was known of its players by now.
+        # Each track's identity over time: (half, shot, track) -> ([time it was known], [(team, player)]),
+        # so a frame from the past can be labelled with what was known of its players by now. A
+        # frame's identity comes from the votes of its whole window (DESIGN.md §6.1 identity (f)),
+        # so it is known when the last window holding the frame ends, not at the frame.
+        ev = config["events"]
         self.voted: dict[tuple, tuple[list, list]] = {}
         for half, frames in perceived.items():
+            windows = fixed_windows(max(frames) + 1 / ev["sample_fps"], ev["window_seconds"], ev["window_overlap"])
             for s in sorted(frames):
+                known = next(end for start, end in reversed(windows) if start <= s)
                 for tr in frames[s][0]:
-                    seconds, ids = self.voted.setdefault((half, *tr.key), ([], []))
-                    seconds.append(s)
+                    times, ids = self.voted.setdefault((half, *tr.key), ([], []))
+                    times.append(known)
                     ids.append((tr.team, tr.player_id))
 
     def call(self, now: Time, tool: str, args: Mapping[str, Any]) -> Evidence:
@@ -297,15 +303,17 @@ class QATools:
         return frames
 
     def _as_known(self, half: int, tr: Track, now: Time, track_players: Mapping[tuple, str]) -> Track:
-        """A track as known by `now`: memory's confirmed identity, else its latest vote up to now
-        (a player seen in an old frame may have been identified later, but before now)."""
+        """A track as known by `now`: memory's confirmed identity, else its latest identity known by
+        now (a player seen in an old frame may have been identified later, but before now). A
+        track whose first window has not ended yet has none: the frame's own identity comes
+        from that window's votes."""
         key = (half, *tr.key)
         if key in track_players:
             return replace(tr, player_id=track_players[key])
         seconds, ids = self.voted.get(key, ([], []))
         i = bisect_right(seconds, now[1]) - 1 if half == now[0] else len(seconds) - 1
         if i < 0:
-            return tr
+            return replace(tr, team=None, player_id=None)
         team, player = ids[i]
         return replace(tr, team=team or tr.team, player_id=player or tr.player_id)
 

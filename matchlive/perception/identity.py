@@ -4,7 +4,11 @@ Two parts:
   * kit_color(): the per-crop kit-colour observation, computed during the video pass and
     stored in the raw perception cache (it needs pixels);
   * IdentityResolver: streaming, per-frame vote over those cached observations — call
-    update() once per frame in order; identities at frame t use only frames <= t.
+    update() once per frame in order; identities at frame t use only frames <= t. The
+    event analyzer is not shown those: it is shown a window's frames only once the window
+    is over, so vote() is called for every frame and resolve() once at the window's end on
+    the window's frames, which gives each track's identity from the votes of the whole
+    window (and before it) instead of the votes up to each frame.
 
 Team comes from kit colour matched in LAB space, number from the jersey classifier; both
 are accumulated as per-track votes (tracks are keyed (shot_id, track_id)).
@@ -106,10 +110,17 @@ class IdentityResolver:
                colors: np.ndarray, roster: Mapping[tuple[str, str], str],
                confirmed: Mapping[tuple, str]) -> list[Track]:
         """Cast this frame's votes and return `tracks` with team / player_id /
-        identity_source filled in. `jersey_probs` (N, 101) and `colors` (N, 3) are the
-        cached observations of these tracks (NaN = none). `roster` ((team, number) ->
-        player_id, see roster_index) and `confirmed` (track key -> player_id) come from
-        memory and are passed every frame, since both change during a match."""
+        identity_source filled in from the votes so far (= vote() then resolve()).
+        `jersey_probs` (N, 101) and `colors` (N, 3) are the cached observations of these
+        tracks (NaN = none). `roster` ((team, number) -> player_id, see roster_index) and
+        `confirmed` (track key -> player_id) come from memory and are passed every frame,
+        since both change during a match."""
+        self.vote(frame_idx, tracks, jersey_probs, colors)
+        return self.resolve(tracks, roster, confirmed)
+
+    def vote(self, frame_idx: int, tracks: Sequence[Track], jersey_probs: np.ndarray,
+             colors: np.ndarray) -> None:
+        """Cast this frame's team and number votes (call in frame order)."""
         cfg = self.config
         # A vote every `vote_every` frames (v2 used 15; reading every frame is affordable
         # now, so the default is 1).
@@ -120,6 +131,15 @@ class IdentityResolver:
                     label = int(np.argmax(probs))
                     if label != UNREADABLE and probs[label] >= cfg["jersey_min_prob"]:
                         self.number_votes[track.key][label_to_number(label)] += 1
+
+    def resolve(self, tracks: Sequence[Track], roster: Mapping[tuple[str, str], str],
+                confirmed: Mapping[tuple, str]) -> list[Track]:
+        """`tracks` (one frame's) with team / player_id / identity_source filled in from ALL
+        the votes cast so far, whichever frame they came from. Called right after vote() for
+        the same frame it is the causal identity; called at the end of a window for the
+        window's frames, it is the window's identity: a track is named from the votes of the
+        whole window (and before it), not from the votes up to each frame."""
+        cfg = self.config
 
         # Each track's team, and its candidate players scored by number votes.
         teams = [self._team(t.key) for t in tracks]

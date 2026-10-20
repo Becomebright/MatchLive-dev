@@ -41,8 +41,7 @@ def main():
     seconds = [window[0] + k / ev["sample_fps"] for k in range(int(ev["window_seconds"] * ev["sample_fps"]))]
     frame_of = {s: int(round(s * fps)) for s in seconds}
 
-    resolved = resolve_frames(config, match, arrays, set(frame_of.values()))
-    perceived = {s: resolved[f] for s, f in frame_of.items() if f in resolved}
+    perceived = resolve_frames(config, match, arrays, fps, frame_of, [window])[window]
     cap = cv2.VideoCapture(str(match.video_path(args.half)))
     frames = []
     for s in seconds:
