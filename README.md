@@ -12,8 +12,8 @@ neuro-symbolic truth-maintenance loop over perception and a match memory — see
 
 ## Streaming QA
 
-The streaming-QA benchmark (`dataset/streamingqa/part1/`, 817 multiple-choice questions on two
-matches) asks questions while a match is playing. MatchLive plays each match as a live stream,
+The streaming-QA benchmark (`dataset/streamingqa/part1_1001/`, 700 multiple-choice questions on two
+matches; the 0926 and 0929 versions are deprecated) asks questions while a match is playing. MatchLive plays each match as a live stream,
 knowing only the pre-match facts: team names, the squads (shirt numbers, starting XI, positions),
 kit colours, and which end each team defends. A question at time *t* is answered from what the
 system knew at *t*: its match memory as written by then, and the broadcast frames before *t*.
@@ -29,41 +29,42 @@ Two steps per match, each a script:
 `scripts/eval_live.py` summarises a step-1 run (event entries, cases and verdicts, score and
 substitutions at the final whistle).
 
-### Reproduce the reported results from the shared caches
+### Reproduce the reported results from the caches
 
-With the prerequisites, environment and assets of `docs/SETUP.md` §0–3 (including `cache/*`), the recorded
-runs replay exactly: no GPU work and no API key, every model answer comes from `cache/api/`. If
-anything diverged, a request would miss the cache and the run would stop with `NoAPIKey`.
+The reference run is `full_2xl_window` (`docs/results.md` §33): the RF-DETR-2XL detector, the jersey
+reader retrained with SoccerNet-GSR, and identity resolved per window (`DESIGN.md` §6.1 (f)). With
+the raw perception cache of both halves and `cache/api/` in place, it replays exactly: no GPU work and
+no API key, every model answer comes from the cache. If anything diverged, a request would miss the
+cache and the run would stop with `NoAPIKey`.
+
+**Today this works only on the development machine**: the perception caches and `cache/api.tar.gz` in
+the Hugging Face repo are still those of the earlier runs, which do not match the current default
+config (`docs/SETUP.md` §3). Elsewhere, perceive on a GPU first (below) and expect API calls, not a replay,
+until the new caches are uploaded.
 
 ```bash
 conda activate matchlive
-# without configs/api.local.yaml (a fresh clone has none) nothing but the cache can be used
-pytest tests/                               # 54 tests
+pytest tests/                               # 64 tests
 M="2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool"
-# the recorded runs used the previous jersey checkpoint (docs/results.md §30); the raw perception
-# cache is keyed by the model file, so point the replay at it
-python scripts/run_live.py --match "$M" --set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx   # ~3 min
-python scripts/eval_live.py --match "$M"    # 221 windows, 24 cases, score in memory 1-2
-python scripts/run_qa.py --match "$M" --mode tools       # ~2 min: 0.923
-python scripts/run_qa.py --match "$M" --mode dump_log    # seconds: 0.783
-python scripts/run_qa.py --match "$M" --mode blind       # seconds: 0.602
-# the 1001 version of the benchmark (a folder of per-match files): writes <mode>_1001.jsonl
-python scripts/run_qa.py --match "$M" --mode tools --benchmark dataset/streamingqa/part1_1001 --tag 1001   # 0.879
+python scripts/run_live.py --match "$M" --name full_2xl_window    # ~3 min replaying from the caches
+python scripts/eval_live.py --match "$M" --run full_2xl_window    # 221 windows, 29 cases, score in memory 1-2
+python scripts/run_qa.py --match "$M" --run full_2xl_window --mode tools \
+    --benchmark dataset/streamingqa/part1_1001 --tag 1001         # ~2 min: 0.876
 ```
-The other match is `"2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United"`. Expected accuracy:
+The other match is `"2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United"`. Accuracy of the reference run
+(`tools` mode, benchmark 1001, gemini-3.8-flash; single runs, about ±1 point of noise):
 
-| Benchmark | Match | tools (MatchLive) | dump_log (whole event log, no video) | blind (question and options only) |
-|---|---|---|---|---|
-| `part1/benchmark-0926.jsonl` | Chelsea – Liverpool (405 questions) | 0.923 | 0.783 | 0.602 |
-| | Chelsea – Manchester United (412) | 0.893 | 0.801 | 0.631 |
-| | Both (817) | 0.908 | 0.792 | 0.617 |
-| `part1_1001/` | Chelsea – Liverpool (347) | 0.879 | 0.674 | 0.493 |
-| | Chelsea – Manchester United (353) | 0.861 | 0.722 | 0.595 |
-| | Both (700) | 0.870 | 0.699 | 0.544 |
+| Match | Questions | tools (MatchLive) |
+|---|---|---|
+| Chelsea – Liverpool | 347 | 0.876 |
+| Chelsea – Manchester United | 353 | 0.881 |
+| Both | 700 | 0.879 |
 
-The 0926 numbers differ slightly from `docs/results.md` §14 (0.909 there): since then a void
-arbiter verdict gets one more try, which changes the Manchester United memory from 2H 40:32, and a
-JSON answer followed by stray text is parsed (§15).
+The runs before 2026-10-19 (RF-DETR-L, the previous jersey reader, per-frame identity) scored 0.879,
+0.861 and 0.870 on the same questions. They are kept in `outputs/` but no longer replay: the detector,
+the jersey reader and the identity resolution all changed what the analyzer is shown, so its requests
+differ from the cached ones. The `blind` and `dump_log` baselines were last run on the 0926 benchmark
+(`docs/results.md` §14–§16).
 
 `run_qa.py --half 1` or `--limit N` answer a subset, written to its own file.
 
