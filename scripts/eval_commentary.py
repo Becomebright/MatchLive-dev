@@ -27,6 +27,12 @@ broadcast's own commentary (scripts/transcribe_broadcast.py): the share of match
 per minute of match, lines per minute, words per line, lexical variety (distinct word pairs) and
 lines opening like one of the ten before them. A play line said as a burst of short phrases counts
 as its phrases.
+
+Timing, next to the broadcast's commentary too: the visible true shots and goals some line calls in
+time — starting within [-1, +3] s of the labelled moment and saying something a shot call says (a
+shot, a save, wide, blocked, ...) — how long after the frame it was written for a phrase starts,
+the speaking rate (words per second of each voiced line, or each transcript segment), and the
+energy (tone) lines are said with.
 """
 
 from __future__ import annotations
@@ -48,6 +54,15 @@ from matchlive.memory.store import MatchMemory
 from matchlive.memory.types import Event, Op
 
 IMPORTANT = ("goal", "red_card", "penalty", "yellow_card", "substitution")
+# What calling a shot as it happens sounds like (ours and the broadcast's, scored the same way).
+SHOT_CALL = re.compile(r"\b(shot|shoots?|strikes?|struck|effort|saved?|saves|wide|blocked|blocks?|header|heads?|"
+                       r"fires?|volley|drives?|curls?|goal|scores?|chance|keeper|post|crossbar|over the bar)\b", re.I)
+
+
+def called_in_time(said: list[tuple[int, float, str]], when: tuple[int, float]) -> bool:
+    """Whether one of `said` ((half, start, text)) calls the shot at `when` as it happens."""
+    half, t = when
+    return any(h == half and t - 1 <= start <= t + 3 and SHOT_CALL.search(text) for h, start, text in said)
 
 
 def claims(lines, true_of, truth, events) -> Counter:
@@ -145,12 +160,14 @@ def main():
     base = load_config()
     out = base["paths"]["outputs"]
 
-    rows, styles = {}, {}
+    rows, styles, timing = {}, {}, {}
     human_texts, human_speech, total_seconds = [], 0.0, 0.0
+    human_timing = {"shots": 0, "called": 0, "rate": []}
     for run in args.runs:
         ours, blind, text, lags = Counter(), Counter(), Counter(), []
         texts, speech = [], 0.0
         seconds = 0.0
+        timing[run] = {"shots": 0, "called": 0, "rate": [], "after_frame": [], "tone": Counter()}
         for name in args.match or MATCHES:
             folder = out / "commentary" / name / run
             if not (folder / "lines.jsonl").exists():
@@ -204,6 +221,17 @@ def main():
                 if line["entry"] in true_of and line["kind"] == "news":
                     g = truth[true_of[line["entry"]]]
                     lags.append(line["t_ready"][1] - g["time"][1] if line["t_ready"][0] == g["time"][0] else np.nan)
+            # Timing: shots and goals called as they happen, how long after its frame a phrase
+            # starts, the speaking rate and the energy.
+            tm = timing[run]
+            shots = [g["time"] for g in truth if g["visible"] and g["type"] in ("shot", "goal")
+                     and any(h == g["time"][0] and a <= g["time"][1] < b for h, a, b in ranges)]
+            said = [(l["show"][0], l["show"][1], l["text"]) for l in lines]
+            tm["shots"] += len(shots)
+            tm["called"] += sum(called_in_time(said, g) for g in shots)
+            tm["rate"] += [len(l["text"].split()) / l["duration"] for l in lines if l.get("audio") and l["duration"]]
+            tm["after_frame"] += [l["show"][1] - l["at"][1] for l in lines if l.get("at")]
+            tm["tone"].update(l["tone"] for l in lines)
             if run == args.runs[0]:
                 for h, a, b in ranges:
                     ref = out / "reference" / name / f"half{h}.json"
@@ -211,6 +239,11 @@ def main():
                         segs = [x for x in json.loads(ref.read_text()) if a <= x["start"] < b]
                         human_texts += [x["text"] for x in segs]
                         human_speech += sum(x["end"] - x["start"] for x in segs)
+                        human_timing["called"] += sum(called_in_time([(h, x["start"], x["text"]) for x in segs], g)
+                                                      for g in shots if g[0] == h)
+                        human_timing["shots"] += sum(g[0] == h for g in shots)
+                        human_timing["rate"] += [len(x["text"].split()) / (x["end"] - x["start"])
+                                                 for x in segs if x["end"] > x["start"]]
                 total_seconds += match_seconds
         rows[run] = (ours, blind, text, lags)
         if seconds:
@@ -241,6 +274,17 @@ def main():
         lags = [x for x in lags if not np.isnan(x)]
         if lags:
             print(f"true event -> news line ready (live): p50 {np.median(lags):.0f} s, p90 {np.percentile(lags, 90):.0f} s")
+
+    print(f"\n{'timing':28s} {'shots called in time':>21s} {'start after its frame p50/p90':>30s} "
+          f"{'words/s p50/p90':>16s}  energy")
+    for run, tm in list(timing.items()) + [("human (broadcast)", human_timing)]:
+        after = (f"{np.median(tm['after_frame']):.1f} / {np.percentile(tm['after_frame'], 90):.1f} s"
+                 if tm.get("after_frame") else "-")
+        rate = f"{np.median(tm['rate']):.2f} / {np.percentile(tm['rate'], 90):.2f}" if tm["rate"] else "-"
+        tones = tm.get("tone") or Counter()
+        energy = ", ".join(f"{k} {v / sum(tones.values()):.0%}" for k, v in tones.most_common())
+        print(f"{run:28s} {tm['called']:>10d} / {tm['shots']:<3d} {pct(tm['called'], tm['shots']):>6s} {after:>30s} "
+              f"{rate:>16s}  {energy}")
 
     print(f"\n{'style':28s} {'speech':>7s} {'words/min':>10s} {'lines/min':>10s} {'words/line':>11s} {'distinct-2':>11s} "
           f"{'same opening':>13s}")

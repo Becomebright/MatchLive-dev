@@ -66,14 +66,20 @@ class APIClient:
         self._out: set[int] = set()              # endpoints out of quota: no request goes to them again
         self._lock = threading.Lock()
 
-    def generate(self, parts: Sequence[str | bytes], json_output: bool = False) -> APIResult:
+    def generate(self, parts: Sequence[str | bytes], json_output: bool = False,
+                 reasoning: str | None = None) -> APIResult:
         """One generation over `parts` (str = text, bytes = a JPEG image); `json_output`
-        asks for a JSON answer."""
+        asks for a JSON answer; `reasoning` ("low", ...) sets the model's reasoning effort
+        (by default the model's own), for a caller that cannot wait for a long think."""
         model = self.config["model"]
         # Images enter the key by content hash, so the key stays small and identical
         # images always give the same key.
         request = {"model": model, "json": json_output,
                    "parts": [p if isinstance(p, str) else "jpeg:" + hashlib.sha256(p).hexdigest() for p in parts]}
+        if reasoning is not None:               # in the key only when set: earlier keys are unchanged
+            request["reasoning"] = reasoning
+        if self.config.get("extra_body"):       # server-specific fields, e.g. thinking off on a local vLLM
+            request["extra_body"] = self.config["extra_body"]
         call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
         path = self.cache_dir / f"{call_id}.json"
         if path.exists():
@@ -85,6 +91,10 @@ class APIClient:
                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode()}}
                    for p in parts]
         extra = {"response_format": {"type": "json_object"}} if json_output else {}
+        if reasoning is not None:
+            extra["reasoning_effort"] = reasoning
+        if self.config.get("extra_body"):
+            extra["extra_body"] = self.config["extra_body"]
 
         def call(client):
             resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}], **extra)

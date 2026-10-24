@@ -46,20 +46,30 @@ qa:
   max_frames: 16                       # frames per get_frames / get_current_view
   current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
 
-# Live commentary (DESIGN.md §6.9); lines are generated through the `api` section's model.
+# Live commentary (DESIGN.md §6.9); scripts are generated through the `api` section's model.
 commentary:
-  tick: 1                              # s of match time between the commentator's looks at memory
-  pause: 2.0                           # s of silence between two lines (the broadcast commentators talk ~62% of the time)
-  late: 4                              # s a play or context line may go on air after the moment it was written for
-  late_event: 30                       # ... a line about an event (news, confirmation, correction)
+  # The commentary is written a stretch of video at a time, as a script of timed phrases over all of
+  # its sampled frames (events.sample_fps).
+  segment: 10                          # s of video one script covers
+  # s before a stretch goes on air that its script is asked for: generation and voicing must fit in
+  # it (generation took 10-34 s on the trial, voicing 1-5 s). Memory then knows the stretch with
+  # output_delay - budget s of hindsight.
+  budget: 40
+  # The generator's reasoning effort: by default the flash model thinks for 30-90 s over a stretch's
+  # 20 frames (3,000+ reasoning tokens), past the budget; "low" brings it to 10-34 s (the relay does
+  # not always honour it).
+  reasoning: low
+  # Settings over the `api` section for the scripts alone (empty: the `api` model writes them), e.g.
+  # a model served locally by vLLM (scripts/serve_llm.sh, docs/SETUP.md §2) with its thinking off:
+  #   {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-27B-FP8,
+  #    extra_body: {chat_template_kwargs: {enable_thinking: false}}}   (and reasoning: null)
+  api: {}
+  gap: 0.3                            # s at least between two phrases
+  late: 3                              # s a phrase may start after the frame it was written for (else dropped)
+  late_event: 20                       # ... a phrase saying a must-say item (news, confirmation, correction)
   context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
   context_stale: 600                   # s after which an angle on the match may be said again unchanged
-  background_every: 60                 # s on air at least between two pre-match facts given over the pictures
-  play_words: 12                       # a play line (a burst of short phrases) has at most this many words
-  play_span: 6                         # s of pictures a play line is written over
-  play_frames: 8                       # frames shown for them
-  analysis_every: 30                   # s on air between the co-commentator's views of the play
-  analysis_span: 20                    # s of pictures (spread over play_frames frames) a view is given on
+  background_every: 60                 # s on air at least between two pre-match facts said over the pictures
   recent: 120                          # s: a goal, card, penalty or substitution is news if the viewer saw it at most this long ago
   recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
   hold: 5                              # s a pending event waits for its confirmation before it may go on air
@@ -67,40 +77,43 @@ commentary:
   # only once confirmed — half the pending ones are false (dry runs, results §25).
   pending_minor: false
   echo: 60                             # s: a minor event this close to an aired one it repeats is not news (= consistency.pair_window)
-  # News, most important first; the policy airs one line at a time, so the tail is filler.
+  # News, most important first: when two events are one incident, the more important one is said.
   announce: [goal, red_card, penalty, yellow_card, substitution, injury, shot, corner, offside, free_kick, foul]
   # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
   # (An event aired as fact is corrected whatever its type.)
   confirm: [goal, red_card, penalty, yellow_card, substitution]
-  max_words: 20                        # per line: spoken lines are short
+  max_words: 16                        # per phrase (most are one to six words; a remark in a lull is longer)
   language: English
-  history: 10                          # the last lines shown to the generator, so it does not repeat itself
-  words_per_second: 2.5                # speaking rate: a line keeps the commentator busy this long
+  history: 30                          # the last phrases shown to the generator, so it carries on and does not repeat itself
+  words_per_second: 2.5                # speaking rate, for a phrase with no audio to measure
   # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
-  # 30-90 s memory needs to learn of an event and the generation call. 60 s was too short for the
-  # slowest tenth of the lines (p90 about 80 s, results §22/§25), hence 120 s (2026-10-20). A line is
-  # shown with the video at (ready time - output_delay), but never before the event it speaks of is
-  # on screen.
+  # 30-90 s memory needs to learn of an event, a stretch's length and its script. 60 s was too
+  # short for the slowest tenth of the lines (p90 about 80 s, results §22/§25), hence 120 s (2026-10-20).
   output_delay: 120
-  # The commentator's voice (text-to-speech through the api endpoints): the line's generator picks
-  # a tone, which picks the delivery instruction.
+  # The commentator's voice (text-to-speech through the api endpoints): each phrase is voiced on its
+  # own, and the energy its script gives it picks the delivery instruction.
   voice:
     model: gpt-4o-mini-tts
     voice: ash
     tones:
-      excited: "A British football TV commentator calling a big moment live: voice rising, fast, thrilled."
-      lively: "A British football TV commentator following the play live: engaged, brisk, natural."
-      calm: "A British football TV commentator in a lull: relaxed, warm, conversational."
-    # The co-commentator (a former player giving his view), in a second voice.
-    analyst_voice: onyx
-    analyst_tones:
-      excited: "A former footballer as TV co-commentator, thrilled by what he has just seen: animated, quick."
-      lively: "A former footballer as TV co-commentator giving his opinion: relaxed, knowing, conversational."
-      calm: "A former footballer as TV co-commentator, reflective: low-key, measured, conversational."
+      calm: "Live British football TV commentary in a lull (the ball out of play, a replay, a stoppage): relaxed,
+        conversational, unhurried, a seasoned commentator chatting to the viewers over the crowd."
+      lively: "Live British football TV commentary following the ball: quick, clipped and punchy, the natural cadence
+        of a broadcast commentator calling the play as it happens, a lift on players' names; never like a narrator
+        reading."
+      rising: "Live British football TV commentary as an attack builds towards the box: faster and louder, urgency and
+        anticipation rising in the voice."
+      excited: "Live British football TV commentary at the big moment (a shot, a save, a goal): shouting with
+        excitement over a roaring crowd, fast, loud, the voice soaring."
 
 # The delayed live stream with commentary (scripts/render_stream.py).
 render:
-  background_volume: 0.15              # the broadcast's own sound (its commentary and the crowd), under ours
+  # The broadcast's own sound under ours: with `ambience`, its commentary is taken out (source
+  # separation, htdemucs) and the crowd and the pitch are kept at `ambience_volume`; otherwise the
+  # whole of it, its commentators included, is kept at `background_volume`.
+  ambience: true
+  ambience_volume: 1.0
+  background_volume: 0.15
   font_size: 30                        # subtitles on the 720p video
 # LLM API (DESIGN.md §2 principle 9), called through an OpenAI-compatible endpoint; responses
 # cached under paths.cache/<cache>, keyed by model + request.
@@ -116,6 +129,7 @@ api:
   max_attempts: 8                      # a failed attempt is retried on the next endpoint at once; after a round on all of them, with backoff (5 s doubling, at most max_backoff)
   max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
+  extra_body: {}                       # server-specific request fields, e.g. a local vLLM model's reasoning_effort or chat_template_kwargs
 
 events:
   # Fixed windows over the whole half (DESIGN.md §6.2).

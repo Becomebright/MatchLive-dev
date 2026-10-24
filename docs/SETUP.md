@@ -40,6 +40,12 @@ pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and t
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 pip install pyarrow datasets accelerate tensorboard   # only for retraining the jersey reader (§7)
 pip install pycocotools       # only for scripts/eval_detection_gsr.py (detection AP)
+# Only for scripts/render_stream.py: htdemucs takes the broadcast's commentators out of the sound
+# under ours. --no-deps keeps pip from pulling another torch; torchaudio (which has no build for
+# this torch) is not needed — render_stream.py reads and writes the audio with ffmpeg. The model
+# weights (80 MB) download to ~/.cache/torch/hub on first use.
+pip install --no-deps demucs==4.0.1 julius einops openunmix lameenc dora-search treetable submitit \
+    retrying omegaconf antlr4-python3-runtime==4.9.3 cloudpickle
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
@@ -65,6 +71,24 @@ pip install pycocotools       # only for scripts/eval_detection_gsr.py (detectio
   (`NoAPIKey`) instead of calling the API, so a replay either reproduces the recorded run or fails
   loudly. (Runs up to 2026-09-29 called Gemini directly through `google-genai`; the cache is keyed
   by model and request, not by endpoint, so their answers replay the same.)
+- **Optional: an open model served locally** for a run's model calls, or the commentary's scripts
+  alone (`commentary.api`). vLLM pins its own torch, so it has a conda env of its own,
+  **`vllm-serve`** (Python 3.12):
+  ```bash
+  conda create -n vllm-serve -c conda-forge --override-channels python=3.12 pip
+  ~/miniconda3/envs/vllm-serve/bin/pip install uv
+  ~/miniconda3/envs/vllm-serve/bin/uv pip install --python ~/miniconda3/envs/vllm-serve/bin/python "vllm==0.32.0"
+  hf download Qwen/Qwen3.8-Flash-Next-FP8      # or Qwen/Qwen3.8-27B-FP8
+  PATH=~/miniconda3/envs/vllm-serve/bin:$PATH bash scripts/serve_llm.sh flashnext   # 4 GPUs | qwen27b: 1 GPU
+  ```
+  `scripts/serve_llm.sh` holds each model's flags (from the vLLM recipes, for H100 80GB). The
+  endpoint goes in `configs/vllm.local.yaml` (`endpoints: [{base_url: "http://localhost:8000/v1",
+  api_key: EMPTY}]`). A live run (and its QA, which reads the run's settings) picks the model with
+  `--set api.endpoint=configs/vllm.local.yaml --set api.model=Qwen/Qwen3.8-Flash-Next-FP8 --set
+  api.timeout=900 --set 'api.extra_body={reasoning_effort: medium}'` (Flash-Next thinks at `xhigh` by
+  default: ~6,800 tokens, 27 s an analyzer window; results §35); the commentary's scripts alone with
+  `--set 'commentary.api={endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-27B-FP8, extra_body:
+  {chat_template_kwargs: {enable_thinking: false}}}' --set commentary.reasoning=null`.
 
 ## 3. Model weights, match data and caches (private)
 

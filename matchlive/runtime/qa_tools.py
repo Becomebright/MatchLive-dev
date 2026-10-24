@@ -288,7 +288,7 @@ class QATools:
         block, parts, _ = labelled_frames(frames, known, self.prematch)
         return Evidence(f"{len(frames)} frames of half {half}, {clock(frames[0][0])}-{clock(frames[-1][0])}; "
                         f"player IDs are local to these frames.\n{block}",
-                        [p for p in parts if isinstance(p, bytes)])
+                        [p for p in parts if isinstance(p, bytes)], seconds=[s for s, _ in frames])
 
     def _read(self, half: int, seconds: list[float]) -> list[tuple[float, np.ndarray]]:
         """The video frames at `seconds` of `half` (duplicates once; unreadable ones skipped)."""

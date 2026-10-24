@@ -27,6 +27,7 @@ class Evidence:
     text: str
     images: list[bytes] = field(default_factory=list)     # JPEG bytes
     id: str = ""                                          # set by the loop: "ev1", "ev2", ...
+    seconds: list[float] = field(default_factory=list)    # the video second of each image, where known
 
 
 @dataclass

@@ -634,35 +634,45 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
 
 
 def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
-                   only: tuple[int, float, float] | None = None) -> list[dict]:
+                   only: tuple[int, float, float] | None = None, writer=None) -> list[dict]:
     """Live commentary (DESIGN.md §6.9) over a live run (run_live's output in `run_dir`).
 
-    The broadcast output runs `output_delay` (D) s behind the live feed, and the commentary is laid
-    out on the output's timeline. At match time t on the feed the viewer is at t - D: the policy
-    plans the line that goes on air next — about what the viewer will be watching then — from
-    memory as known at t, i.e. with D s of hindsight on that moment, and says nothing about what the
-    viewer has not seen yet. A play line is written over the frames on air (the last `play_span` s
-    up to it, labelled with who each tracked player is as far as known by t; runtime.qa_tools). The
-    line is generated (one model call through `client`) and voiced (one text-to-speech call); it
-    is ready at t + both latencies and goes on air at ready - D, or when the previous line has
-    ended, and lasts as long as its audio. The next line is planned while this one is being spoken,
-    so that it is ready as this one ends (+ `pause`).
+    The broadcast output runs `output_delay` (D) s behind the live feed, and the commentary is
+    written on the output's timeline, `segment` s of video at a time. The script for the stretch
+    [a, b) is asked for at feed time a + D - `budget`: the feed is then past b, so every sampled
+    frame of the stretch is there (labelled with who each tracked player is as far as known then;
+    runtime.qa_tools), and memory as known then has D - budget s of hindsight on its start. The
+    policy gives the material (what must and may be said, from memory), the generator writes the
+    script (one model call through `client`), each phrase at a frame, and every phrase is voiced
+    (one text-to-speech call each, all at once). The stretch is ready at the asking time + both
+    latencies, so it can go on air from ready - D on. A stretch is asked for every `segment` s and
+    takes longer than that, so a few are under way at once: what one says is known to the next
+    ones (the phrases they carry on from, what the policy has said) only once it is ready, and the
+    items it was given are offered to no other stretch meanwhile. Each phrase goes on air at its frame — or
+    when the previous phrase has ended (+ `gap`), or once the stretch is ready, if later — and
+    lasts as long as its audio; a phrase that would start more than `late` s after its frame
+    (`late_event` for a must-say item) is dropped, and an item none of whose phrases went on air is
+    offered again with the next stretch while it is still news.
 
     Commentary only reads memory, and memory as known at t is a prefix of the run's op log
-    (DESIGN.md §5.4), so driving it from the log after the run gives the lines a live run would
-    have given with the same latencies. A generation that fails after its retries loses the line,
-    as it would live; a failed synthesis leaves it a subtitle only. `only` = (half, start, end)
-    restricts the commentary to that stretch of video time (a trial).
+    (DESIGN.md §5.4), so driving it from the log after the run gives the phrases a live run would
+    have given with the same latencies. A generation that fails after its retries loses the
+    stretch, as it would live; a failed synthesis leaves the phrase a subtitle only. `only` =
+    (half, start, end) restricts the commentary to that stretch of video time (a trial). `writer`,
+    if given, writes the scripts in place of `client` (a model of its own, e.g. served locally;
+    commentary.api), which then only voices them.
 
-    Returns one record per line: its kind, entry, text and tone, the entry's status and the players
-    the line may name, the match times it was decided (t_decide), ready (t_ready) and of its event
-    (t_event), when it is on air ("show": half, start, end in video time), the audio (path,
-    duration), and the calls' ids and latencies.
+    Returns one record per phrase on air: its kind (the material item it says — correction,
+    confirmation, opener, news, recap, background — or play), entry, text and tone (its energy), the
+    entry's status and the players it may name, the stretch it belongs to, the match times it was
+    asked for (t_decide), ready (t_ready), of its event (t_event, or its own frame) and of its frame
+    (at), when it is on air ("show": half, start, end in video time), the material's facts, who is
+    who in the stretch's frames, the audio (path, duration), and the calls' ids and latencies.
     """
     import copy
     import json
     import pickle
-    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
 
     from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
     from matchlive.app.tts import Voice
@@ -671,105 +681,116 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     from matchlive.runtime.qa_tools import QATools
 
     cfg = config["commentary"]
-    delay = cfg["output_delay"]
+    delay, segment = cfg["output_delay"], cfg["segment"]
     mem = MatchMemory(match.prematch["players"], log_path=run_dir / "ops.jsonl", cascade=config["loop"]["cascade"])
     windows = [json.loads(line) for line in open(run_dir / "windows.jsonl")]
     sources = {f"obs:{w['call_id']}#{i}": {"window": w["window"], "candidate": c}
                for w in windows for i, c in enumerate(w.get("candidates", []))}
     half_end = {h: max(w["window"][1] for w in windows if w["half"] == h) for h in (1, 2)}
-    # The frames on air for play lines, labelled as the QA's current view is.
+    # The frames of a stretch, labelled as the QA's current view is: every sampled frame.
     perceived = {h: pickle.load(open(run_dir / f"perceived_half{h}.pkl", "rb")) for h in (1, 2)}
     view_config = copy.deepcopy(config)
-    view_config["qa"]["max_frames"] = cfg["play_frames"]
+    view_config["qa"]["max_frames"] = int(segment * config["events"]["sample_fps"]) + 1
     pictures = QATools(view_config, match, mem, perceived, sources)
     policy = CommentaryPolicy(cfg, match.prematch, sources)
-    commentator = Commentator(cfg, lambda parts: client.generate(parts, json_output=True))
+    writer = writer or client
+    commentator = Commentator(cfg, lambda parts: writer.generate(parts, json_output=True, reasoning=cfg["reasoning"]))
     voice = Voice(cfg["voice"], client.speech)
+
+    def speak(phrase):
+        """(audio, duration, latency) of one phrase; a failed synthesis leaves it a subtitle only."""
+        try:
+            spoken = voice.say(phrase.text, phrase.energy)
+            return str(spoken.path), spoken.duration, spoken.latency
+        except NoAPIKey:
+            raise
+        except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
+            if "dry run" not in str(e):
+                print(f"no voice for {phrase.text!r}: {e}", flush=True)
+            return None, speaking_time(phrase.text, cfg["words_per_second"]), 0.0
+
+    def key(item):
+        """What an item is about, to tell two offers of the same thing apart."""
+        if item.entry is not None:
+            return ("entry", item.entry)
+        return ("angle", item.angle[0]) if item.angle is not None else (item.kind,)
+
     lines: list[dict] = []
-    for half in (1, 2):
-        if only and only[0] != half:
-            continue
-        first, last = (only[1], only[2]) if only else (0.0, half_end[half])
-        ends = first                       # video time the previous line ends (+ pause)
-        # How long a line takes to generate and voice: planned with the median of the last few + a
-        # margin (one slow call must not throw the plan out); a line that is not ready in time is
-        # dropped (before it is voiced, if possible).
-        took = deque([10.0], maxlen=5)
-        # Voicing is planned the same way, from the last few voiced lines: a line found too late is
-        # dropped before it is voiced, so a single slow voicing taken as the estimate would make
-        # every later line look too late, and never be replaced.
-        spoke = deque([1.5], maxlen=5)
-
-        def expected():
-            return sorted(took)[len(took) // 2] + 2.0
-
-        t = free = first + delay - expected()                    # match time on the feed
-        while t - delay <= last:
-            if t < free:
-                t += cfg["tick"]
+    with ThreadPoolExecutor(8) as pool:
+        for half in (1, 2):
+            if only and only[0] != half:
                 continue
-            # The moment on air: when this line will be ready — never past the feed (its frames).
-            on_air = (half, min(max(t + expected() - delay, ends), t - 1.0))
-            if on_air[1] > last:
-                break
-            item = policy.decide(mem.at((half, t)), on_air)
-            frames = None
-            if item.kind in ("play", "analysis"):
-                frames = pictures.call((half, t), "get_frames", {"half": half, "start": item.t_event[1], "end": on_air[1]})
-                if not frames.images:          # nothing to look at (e.g. no frames yet)
-                    t += cfg["tick"]
+            first, last = (only[1], only[2]) if only else (0.0, half_end[half])
+            ends = first                       # video time the previous phrase ends (+ gap)
+            # Stretches asked for and not yet ready: one is asked every `segment` s and takes
+            # longer than that, so a few are under way at once. What one says (the phrases the next
+            # ones carry on from, the items the policy marks as said) is known once it is ready;
+            # until then the items it was given are offered to no other stretch.
+            under_way: list[dict] = []
+            history: list[str] = []
+
+            def settle(now):
+                """Take in every stretch ready by feed time `now`."""
+                for done in [s for s in under_way if s["ready"] <= now]:
+                    under_way.remove(done)
+                    history.extend(done["texts"])
+                    for item, (texts, start) in done["said"]:
+                        policy.said(item, " ".join(texts), (half, start))
+
+            a = first
+            while a < last:
+                b = min(a + segment, last)
+                t = max(a + delay - cfg["budget"], b)          # feed time the script is asked for
+                settle(t)
+                # Every sampled frame of [a, b) (the frame at b opens the next stretch).
+                frames = pictures.call((half, t), "get_frames", {"half": half, "start": a, "end": b - 0.01})
+                if not frames.images:          # nothing to look at
+                    a = b
                     continue
-                # Pre-match background on a player the pictures identify, now and then.
-                item.facts += policy.on_screen(frames.text, on_air)
-            try:
-                text, tone, latency, call_id, phrases = commentator.line(item, [line["text"] for line in lines], frames)
-            except NoAPIKey:
-                raise
-            except Exception as e:  # noqa: BLE001 — out of API retries: this line is lost
-                print(f"{half}H {t:.0f}s line lost: {e}", flush=True)
-                t += cfg["tick"]
-                continue
-
-            def lateness(ready):
-                start = max(ready - delay, ends)
-                if item.t_event and item.t_event[0] == half and item.kind not in ("play", "analysis"):
-                    start = max(start, item.t_event[1] + 1.0)          # never before its event is on screen
-                return start, start - on_air[1] > cfg["late_event" if item.entry else "late"]
-
-            speak_took = sorted(spoke)[len(spoke) // 2]
-            start, late = lateness(t + latency + speak_took)
-            if not late:
+                view = mem.at((half, t))
+                taken = {key(item) for s in under_way for item in s["items"]}
+                # Pre-match background over the pictures, unless a stretch under way was given some
+                # (it may be on air, and one comes every `background_every` s at most).
+                pictured = [] if any(item.kind == "background" for s in under_way for item in s["items"]) \
+                    else policy.on_screen(frames.text, (half, a))
+                items = [item for item in policy.material(view, (half, a, b)) + pictured if key(item) not in taken]
                 try:
-                    spoken = voice.say(text, tone, analyst=item.kind == "analysis")
-                    audio, duration, tts_latency = str(spoken.path), spoken.duration, spoken.latency
-                    spoke.append(tts_latency)
+                    script, latency, call_id = commentator.script(items, frames, policy.where(view, (half, a, b)), history)
                 except NoAPIKey:
                     raise
-                except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
-                    if "dry run" not in str(e):
-                        print(f"{half}H {t:.0f}s no voice: {e}", flush=True)
-                    audio, duration, tts_latency = None, speaking_time(text, cfg["words_per_second"]), 0.0
-                start, late = lateness(t + latency + tts_latency)
-            took.append(latency + speak_took)
-            if late:
-                # Ready too late for the moment it was written for (a slow call): live, it is dropped —
-                # and not picked again (its moment has passed).
-                print(f"{half}H {t:.0f}s [{item.kind}] too late by {start - on_air[1]:.0f} s: dropped", flush=True)
-                policy.dropped(item, on_air)
-                t += cfg["tick"]
-                continue
-            ready = t + latency + tts_latency
-            policy.said(item, text, (half, start))
-            lines.append({"kind": item.kind, "entry": item.entry, "status": item.status, "named": item.named,
-                          "text": text, "tone": tone, "t_decide": (half, t), "t_ready": (half, ready),
-                          "t_event": item.t_event, "show": (half, start, start + duration), "facts": item.facts,
-                          "pictures": frames.text if frames is not None else None,   # who is who in its frames
-                          "phrases": phrases,                                          # a play line's burst
-                          "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
-                          "tts_latency": tts_latency})
-            print(f"{half}H {clock(start)} [{item.kind}/{tone}] {text}", flush=True)
-            ends = start + duration + cfg["pause"]
-            # Plan the next line so that it is ready as this one ends.
-            free = max(t + cfg["tick"], ends + delay - expected())
-            t += cfg["tick"]
+                except Exception as e:  # noqa: BLE001 — out of API retries: this stretch is lost
+                    print(f"{half}H {clock(a)} stretch lost: {e}", flush=True)
+                    a = b
+                    continue
+                spoken = list(pool.map(speak, script))
+                tts_latency = max((s[2] for s in spoken), default=0.0)
+                ready = t + latency + tts_latency
+                said: dict[int, tuple[list[str], float]] = {}  # item -> (its phrases on air, when the first started)
+                texts = []
+                for p, (audio, duration, _) in zip(script, spoken):
+                    start = max(p.at, ends, ready - delay)
+                    must = p.item is not None and p.item.must
+                    if start - p.at > cfg["late_event" if must else "late"]:
+                        print(f"{half}H {clock(p.at)} [{p.item.kind if p.item else 'play'}] too late by "
+                              f"{start - p.at:.1f} s: dropped {p.text!r}", flush=True)
+                        continue
+                    item = p.item
+                    if item is not None:
+                        said.setdefault(id(item), ([], start))[0].append(p.text)
+                    texts.append(p.text)
+                    lines.append({"kind": item.kind if item else "play", "entry": item.entry if item else None,
+                                  "status": item.status if item else None, "named": item.named if item else {},
+                                  "text": p.text, "tone": p.energy, "segment": (half, a, b),
+                                  "t_decide": (half, t), "t_ready": (half, ready),
+                                  "t_event": item.t_event if item and item.t_event else (half, p.at),
+                                  "at": (half, p.at), "show": (half, start, start + duration),
+                                  "facts": item.facts if item else [], "pictures": frames.text,
+                                  "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
+                                  "tts_latency": tts_latency})
+                    print(f"{half}H {clock(start)} [{lines[-1]['kind']}/{p.energy}] {p.text}", flush=True)
+                    ends = start + duration + cfg["gap"]
+                under_way.append({"ready": ready, "items": items, "texts": texts,
+                                  "said": [(item, said[id(item)]) for item in items if id(item) in said]})
+                a = b
+            settle(float("inf"))
     return lines
