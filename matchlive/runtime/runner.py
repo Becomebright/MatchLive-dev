@@ -642,7 +642,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     [a, b) is asked for at feed time a + D - `budget`: the feed is then past b, so every sampled
     frame of the stretch is there (labelled with who each tracked player is as far as known then;
     runtime.qa_tools), and memory as known then has D - budget s of hindsight on its start. The
-    policy gives the material (what must and may be said, from memory), the generator writes the
+    policy gives the material (what must be said, from memory), the generator writes the
     script (one model call through `client`), each phrase at a frame, and every phrase is voiced
     (one text-to-speech call each, all at once). The stretch is ready at the asking time + both
     latencies, so it can go on air from ready - D on. A stretch is asked for every `segment` s and
@@ -663,7 +663,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     commentary.api), which then only voices them.
 
     Returns one record per phrase on air: its kind (the material item it says — correction,
-    confirmation, opener, news, recap, background — or play), entry, text and tone (its energy), the
+    confirmation, opener, news — or background when it only tells a pre-match fact, else play;
+    and the fact's id), entry, text and tone (its energy), the
     entry's status and the players it may name, the stretch it belongs to, the match times it was
     asked for (t_decide), ready (t_ready), of its event (t_event, or its own frame) and of its frame
     (at), when it is on air ("show": half, start, end in video time), the material's facts, who is
@@ -694,7 +695,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     pictures = QATools(view_config, match, mem, perceived, sources)
     policy = CommentaryPolicy(cfg, match.prematch, sources)
     writer = writer or client
-    commentator = Commentator(cfg, lambda parts: writer.generate(parts, json_output=True, reasoning=cfg["reasoning"]))
+    commentator = Commentator(cfg, lambda parts: writer.generate(parts, json_output=True, reasoning=cfg["reasoning"]),
+                              match.prematch["players"], policy.knowledge, policy.lineups)
     voice = Voice(cfg["voice"], client.speech)
 
     def speak(phrase):
@@ -711,9 +713,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
 
     def key(item):
         """What an item is about, to tell two offers of the same thing apart."""
-        if item.entry is not None:
-            return ("entry", item.entry)
-        return ("angle", item.angle[0]) if item.angle is not None else (item.kind,)
+        return ("entry", item.entry) if item.entry is not None else (item.kind,)
 
     lines: list[dict] = []
     with ThreadPoolExecutor(8) as pool:
@@ -727,7 +727,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
             # ones carry on from, the items the policy marks as said) is known once it is ready;
             # until then the items it was given are offered to no other stretch.
             under_way: list[dict] = []
-            history: list[str] = []
+            history: list[tuple[float, str]] = []  # (video second it began, text)
 
             def settle(now):
                 """Take in every stretch ready by feed time `now`."""
@@ -736,6 +736,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                     history.extend(done["texts"])
                     for item, (texts, start) in done["said"]:
                         policy.said(item, " ".join(texts), (half, start))
+                    for fact, start in done["told"]:
+                        policy.told(fact, (half, start))
 
             a = first
             while a < last:
@@ -749,13 +751,14 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                     continue
                 view = mem.at((half, t))
                 taken = {key(item) for s in under_way for item in s["items"]}
-                # Pre-match background over the pictures, unless a stretch under way was given some
-                # (it may be on air, and one comes every `background_every` s at most).
-                pictured = [] if any(item.kind == "background" for s in under_way for item in s["items"]) \
-                    else policy.on_screen(frames.text, (half, a))
-                items = [item for item in policy.material(view, (half, a, b)) + pictured if key(item) not in taken]
+                items = [item for item in policy.material(view, (half, a, b)) if key(item) not in taken]
                 try:
-                    script, latency, call_id = commentator.script(items, frames, policy.where(view, (half, a, b)), history)
+                    before = [(s["span"][0], s["span"][1], s["pictures"], s["items"])
+                              for s in sorted(under_way, key=lambda s: s["span"])]
+                    # Facts already told, and those a stretch under way tells: none goes twice.
+                    told = {**{f: (half, start) for s in under_way for f, start in s["told"]}, **policy.facts_told}
+                    script, latency, call_id = commentator.script(items, frames, policy.where(view, (half, a, b)),
+                                                                  history, before, told)
                 except NoAPIKey:
                     raise
                 except Exception as e:  # noqa: BLE001 — out of API retries: this stretch is lost
@@ -766,30 +769,34 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 tts_latency = max((s[2] for s in spoken), default=0.0)
                 ready = t + latency + tts_latency
                 said: dict[int, tuple[list[str], float]] = {}  # item -> (its phrases on air, when the first started)
-                texts = []
+                texts, told = [], []
                 for p, (audio, duration, _) in zip(script, spoken):
                     start = max(p.at, ends, ready - delay)
-                    must = p.item is not None and p.item.must
-                    if start - p.at > cfg["late_event" if must else "late"]:
+                    if start - p.at > cfg["late_event" if p.item is not None else "late"]:
                         print(f"{half}H {clock(p.at)} [{p.item.kind if p.item else 'play'}] too late by "
                               f"{start - p.at:.1f} s: dropped {p.text!r}", flush=True)
                         continue
                     item = p.item
                     if item is not None:
                         said.setdefault(id(item), ([], start))[0].append(p.text)
-                    texts.append(p.text)
-                    lines.append({"kind": item.kind if item else "play", "entry": item.entry if item else None,
+                    texts.append((start, p.text))
+                    if p.fact:
+                        told.append((p.fact, start))
+                    lines.append({"kind": item.kind if item else "background" if p.fact else "play",
+                                  "fact": p.fact, "entry": item.entry if item else None,
                                   "status": item.status if item else None, "named": item.named if item else {},
                                   "text": p.text, "tone": p.energy, "segment": (half, a, b),
                                   "t_decide": (half, t), "t_ready": (half, ready),
                                   "t_event": item.t_event if item and item.t_event else (half, p.at),
                                   "at": (half, p.at), "show": (half, start, start + duration),
-                                  "facts": item.facts if item else [], "pictures": frames.text,
+                                  "facts": item.facts if item else [policy.knowledge[p.fact]] if p.fact else [],
+                                  "pictures": frames.text,
                                   "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
                                   "tts_latency": tts_latency})
                     print(f"{half}H {clock(start)} [{lines[-1]['kind']}/{p.energy}] {p.text}", flush=True)
                     ends = start + duration + cfg["gap"]
-                under_way.append({"ready": ready, "items": items, "texts": texts,
+                under_way.append({"ready": ready, "items": items, "texts": texts, "told": told, "span": (a, b),
+                                  "pictures": frames.text,
                                   "said": [(item, said[id(item)]) for item in items if id(item) in said]})
                 a = b
             settle(float("inf"))

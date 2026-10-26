@@ -7,8 +7,8 @@ Replaying from the cache is what lets offline runs apply a result at "issue time
 measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share calls whose
 inputs are identical. The key does not depend on the endpoint: the same model answers the
 same request wherever it is reached, so answers cached before a change of endpoint stay valid.
-Text-to-speech for the commentary (speech()) goes through the same endpoints and is cached the
-same way, as MP3 files.
+Text-to-speech for the commentary (speech()) is cached the same way, as MP3 files; it goes through
+the same endpoints, or through its own (`api.speech_endpoint`, a voice model served locally).
 
 The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
 (configs/api.local.yaml, gitignored: keys never go into the repo), in order: a failed request is
@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
+import subprocess
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -64,6 +67,7 @@ class APIClient:
         self.speech_dir = cache_dir / config.get("speech_cache", "tts")
         self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
         self._out: set[int] = set()              # endpoints out of quota: no request goes to them again
+        self._speech: APIClient | None = None    # over api.speech_endpoint, made on the first speech request
         self._lock = threading.Lock()
 
     def generate(self, parts: Sequence[str | bytes], json_output: bool = False,
@@ -114,8 +118,19 @@ class APIClient:
 
     def speech(self, text: str, voice: str, instructions: str, model: str) -> SpeechResult:
         """`text` spoken by `voice` in the manner `instructions` describe (text-to-speech, MP3),
-        cached like generate() under the hash of the request, in paths.cache/<api.speech_cache>."""
+        cached like generate() under the hash of the request, in paths.cache/<api.speech_cache>.
+
+        A voice-cloning model (fishaudio/drama-3) takes no description of the manner: `instructions`
+        then names a reference recording under the repo root (<name>.wav, its transcript in
+        <name>.txt), whose voice and delivery the speech copies. The request goes to the endpoints of
+        `api.speech_endpoint` when it is set (a model served locally), else to the usual ones."""
         request = {"model": model, "voice": voice, "instructions": instructions, "text": text, "format": "mp3"}
+        clone = model.startswith("fishaudio/")
+        if clone:
+            ref = REPO_ROOT / instructions
+            ref_audio, ref_text = ref.with_suffix(".wav").read_bytes(), ref.with_suffix(".txt").read_text().strip()
+            # The recording by content in the key: a re-recorded reference is a new request.
+            request["reference"] = hashlib.sha256(ref_audio + ref_text.encode()).hexdigest()
         call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
         path = self.speech_dir / f"{call_id}.mp3"
         meta = path.with_suffix(".json")
@@ -129,7 +144,27 @@ class APIClient:
                 raise ValueError("empty audio")
             return audio
 
-        audio, latency, client = self._call(call)
+        def call_clone(client):
+            wav = client.audio.speech.create(
+                model=model, voice=voice, input=text, response_format="wav",
+                extra_body={"ref_audio": "data:audio/wav;base64," + base64.b64encode(ref_audio).decode(),
+                            "ref_text": ref_text}).read()
+            with wave.open(io.BytesIO(wav)) as w:
+                seconds = w.getnframes() / w.getframerate()
+            # drama-3 now and then goes on generating silence up to its token limit (vLLM-Omni's
+            # recipe): speech far longer than the words need (about 0.4 s a word) is a failed take,
+            # and sampling differs from call to call, so a retry usually comes out right.
+            if seconds > 0.6 * len(text.split()) + 3:
+                raise ValueError(f"{seconds:.1f} s of audio for {len(text.split())} words")
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "mp3", "pipe:1"], input=wav,
+                                  capture_output=True, check=True).stdout
+
+        with self._lock:
+            if self.config.get("speech_endpoint") and self._speech is None:
+                # The same client over the speech endpoints alone: a local TTS server must not take
+                # over the other calls when an endpoint fails, nor they its requests.
+                self._speech = APIClient({**self.config, "endpoint": self.config["speech_endpoint"]}, Path())
+        audio, latency, client = (self._speech or self)._call(call_clone if clone else call)
         _write(path, audio)
         _write(meta, json.dumps({"latency": latency, "model": model, "endpoint": str(client.base_url)}).encode())
         return SpeechResult(call_id, path, latency, cached=False)
