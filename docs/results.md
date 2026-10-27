@@ -1651,6 +1651,18 @@ python scripts/run_qa.py --match "$M" --run flashnext_medium --mode tools --benc
 - 配音变快、语速变快，所以短语更容易排进自己的画面：丢弃的从 14 个降到 6 个，开口不再晚于画面。
 - 时长检查触发了 2 次重试（4 个词出了 7–9 s 音频），都重试成功。
 
+## 37. 带解说的延迟直播，按真实速率流式输出（`DESIGN.md` §6.10 第 1 步，2026-10-24）
+
+> 分支 `live-output`。脚本：`scripts/stream_live.py --match <利物浦场> --run full_2xl_window --name script_h2 --half 2 --start 300 --end 420 --keep`。录像按真实速率当作直播源；短语来自 §34 的 `script_h2`（配音还是 `gpt-4o-mini-tts`），按就绪时刻逐条释放；现场声用 §34 缓存的 htdemucs 分离结果。对照是同一段的离线成片 `outputs/stream/<利物浦场>/script_h2/half2_300-420.mp4`（`scripts/render_stream.py`）。
+
+- **实时性**：120 s 的画面用 120 s 推完。每一帧都按时写出，只有开头编码器启动时滞后过一次，最多 0.30 s。
+- **短语**：46 个上屏，错过 0 个（就绪都早于"开口 + D"）。
+- **和离线成片对齐**：
+  - 画面：3000 帧对 3000 帧，最佳偏移 0 帧（8×8 灰度缩略图逐帧比对）。
+  - 声音：逐采样一致；残差比信号低 25 dB，是两次 AAC 有损编码各自的噪声。
+  - 解码后的音频比离线成片多出开头 1024 个采样（21.3 ms），这是 AAC 编码器的前置延迟。TS 里音频的时间戳正好提前这么多（音频起点 1.400 s，视频 1.4213 s），播放器按时间戳对齐，所以音画同步不受影响；mp4 则是用 edit list 把它裁掉的。
+- **观看**：`--serve 8090` 在服务器上起一个只监听本机的 HTTP 服务；本地执行 `ssh -N -L 8090:localhost:8090 <服务器>`，再用浏览器打开 `http://localhost:8090/`（hls.js 播放页，Safari 原生播放 HLS）。
+
 ## 38. 解说生成换成本地 Flash-Next，调提示（利物浦下半场 0–15 分钟，2026-10-25）
 
 > 分支 `flashnext-commentary`（带着 `drama-tts` 的改动）。事件分析、记忆、仲裁仍用 gemini（`full_2xl_window` 的 live 运行），只把写解说脚本换成本地的 `Qwen/Qwen3.8-Flash-Next-FP8`（`scripts/serve_llm.sh flashnext`，TEP4，GPU 0–3），配音是 drama-3（§36）。§35 试过一次关思考的 Flash-Next（`flashnext_h2`，gpt-4o-mini-tts 配音），生成快但丢弃多、会编名字。这次先找原因，再改提示。
