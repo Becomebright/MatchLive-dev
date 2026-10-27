@@ -8,12 +8,13 @@ from the real consistency check, on the same synthetic roster as tests/test_cons
 import copy
 import json
 
-from matchlive.arbiter.agent import Arbiter, Evidence
+from matchlive.arbiter.agent import Arbiter, Evidence, build_packet
 from matchlive.arbiter.verdict import apply_verdict, reject_newest
 from matchlive.common.config import load_config
 from matchlive.events.analyzer import Candidate
 from matchlive.events.consistency import ConsistencyChecker
 from matchlive.memory.store import MatchMemory
+from matchlive.memory.types import Identity
 
 ROSTER = ([{"hash": f"h{i}", "team_side": "home", "starting": i <= 3} for i in range(1, 5)]
           + [{"hash": f"a{i}", "team_side": "away", "starting": i <= 3} for i in range(1, 5)])
@@ -42,7 +43,7 @@ def match_with(*proposals, tick=None):
     mem, checker = MatchMemory(ROSTER), ConsistencyChecker(copy.deepcopy(CONFIG))
     for n, (t_known, type, team, second, *player) in enumerate(proposals, 1):
         parts = (("player", (1, 1, n)),) if player else ()
-        cand = Candidate(type, team, second, parts, (second,), False)
+        cand = Candidate(type, team, second, parts, False)
         checker.tick(mem, (1, t_known))
         checker.propose(mem, (1, t_known), 1, (second - 15, second + 15), cand, f"obs:call{n}#0", player)
     if tick:
@@ -134,7 +135,49 @@ def test_verdict_without_evidence_changes_nothing():
     case, void = rule(mem, Script({"verdict": {"summary": "a hunch", "actions": [
         {"op": "reject", "observation": "obs:call3#0", "evidence": ["ev9"]}]}}))
     assert void and case.status == "open" and len(mem.ops) == n_ops
-    assert mem.at((1, 600)).score == {"home": 0, "away": 0}      # still held pending
+    assert mem.at((1, 600)).score == {"home": 1, "away": 0}      # the replay still held pending
+
+
+def test_an_entry_id_is_no_observation_to_reject():
+    mem = goal_and_replay()
+    case, void = rule(mem, Script({"requests": [{"tool": "get_frames", "args": {}}]},
+                                  {"verdict": {"actions": [{"op": "reject", "observation": "E2", "evidence": ["ev1"]}]}}))
+    assert void and case.status == "open"
+
+
+def test_an_identity_ruled_on_is_the_only_one_on_its_track():
+    # Two sources disagree on the scorer; the arbiter names track 1/1/1 without rejecting the vote.
+    mem = match_with((130, "goal", "home", 100, "h1"), (150, "goal", "home", 104, "h2"))
+    _, void = rule(mem, Script({"requests": [{"tool": "jersey_reads", "args": {"track": [1, 1, 1]}}]},
+                               {"verdict": {"actions": [{"op": "identity", "track": [1, 1, 1], "player": "h2",
+                                                         "evidence": ["ev1"]}]}}))
+    assert void is None and mem.track_players()[(1, 1, 1)] == "h2"
+    assert [mem.status(eid) for eid, e in mem.entries.items()
+            if isinstance(e, Identity) and e.track_key == (1, 1, 1) and e.player_id == "h1"] == ["retracted"]
+
+
+def test_replacing_a_paired_free_kick_does_not_retract_its_foul():
+    mem = match_with((130, "foul", "away", 100), (150, "free_kick", "home", 110))
+    mem.open_case((1, 300), ["E1"], "restart_after_foul")          # a case about the foul
+    # The verdict names the taker: the fuller account replaces the free kick entry.
+    _, void = rule(mem, Script({"requests": [{"tool": "get_frames", "args": {}}]},
+                               {"verdict": {"actions": [{"op": "add_event", "type": "free_kick", "team": "home", "half": 1,
+                                                         "second": 110, "participants": [{"role": "player", "player": "h1"}],
+                                                         "evidence": ["ev1"]}]}}))
+    assert void is None and mem.status("E2") == "retracted" and mem.status("E1") != "retracted"
+    assert [r.players for r in mem.at((1, 600)).events(type="free_kick", status="confirmed")] == [("h1",)]
+
+
+def test_the_case_shows_what_memory_knows_before_its_interval_ends():
+    # A substitution seen at 290 counts from 335 on; a case opened at 310 still lists it.
+    mem = match_with((300, "substitution", "home", 290))
+    mem.open_case((1, 310), ["read:1/1/9:h4"], "off_roster_read", ["read:1/1/9:h4"])
+    case = mem.cases["C1"]
+    players = [p | {"jersey_number": str(i), "short_name": p["hash"]} for i, p in enumerate(ROSTER)]
+    prematch = {"teams": {"home": "H", "away": "A"}, "jersey_colors": {"home": ["blue", "#0000FF"], "away": ["red", "#FF0000"]},
+                "sides": {1: {"home": "left", "away": "right"}, 2: {"home": "right", "away": "left"}}, "players": players}
+    packet = build_packet(mem, case, (1, 310), {}, prematch, 30)
+    assert "- E1: team home" in packet.split("Substitutions memory holds so far:")[1]
 
 
 def test_verdict_cannot_add_an_event_from_the_future_or_break_a_hard_constraint():

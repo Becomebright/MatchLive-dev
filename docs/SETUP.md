@@ -139,15 +139,16 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | the previous jersey reader: the recorded runs and the shared perception caches were made with it, so replaying them needs `--set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx` (README) |
 | `checkpoints/tts/fenrir_{calm,lively,rising,excited}.{wav,txt}` | 2.9M | reference recordings the commentary's voice (drama-3) clones, one per energy, with their transcripts (`commentary.voice.tones`; made with gemini-3.8-flash-tts, `docs/results.md` §36) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
-| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 830M | raw perception cache (`matchlive/common/cache.py`), written by `scripts/run_perception.py`, read by every later stage |
+| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 320M | raw perception cache (`matchlive/common/cache.py`, format 5: each jersey read keeps its top number and that number's probability, not all 101; 2026-10-26), written by `scripts/run_perception.py`, read by every later stage |
 | `cache/api.tar.gz` → `cache/api/<call id>.json` | 2.3M (14M unpacked) | cached model answers: event analyzer, arbiter and QA calls of the recorded runs (and of other experiments). An archive because a Hugging Face folder holds at most 10,000 files; the `cache/api/` folder in the HF repo is an older subset of it. After new runs, re-pack with `tar -czf api.tar.gz --exclude='*.tmp' -C cache api` and upload it as `cache/api.tar.gz` |
 
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
-change to any of them makes the pipeline look for a new file. The shared perception caches were
-written with the previous detector and jersey ONNX, so under the default config (`rfdetr-2xl-1019` and the `_gsr` model) they are not
-found and the first run perceives from scratch on a GPU; the overrides above (jersey and detector) keep them usable. `cache/trt/` (TensorRT engines) is
-specific to the GPU and is never shared.
+change to any of them makes the pipeline look for a new file. The shared perception caches cover the
+default config (`rfdetr-2xl-1019` and the `_gsr` model) for Liverpool and Manchester United, and the
+previous detector and jersey ONNX for all three matches (the overrides above replay the older recorded
+runs). `cache/trt/` (TensorRT engines, in a folder per model file content) is specific to the GPU
+and is never shared.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
 elsewhere:

@@ -38,15 +38,19 @@ loop:
   # evidence for the consistency check. Off: votes over the whole squad (v2).
   state_to_perception: true
 
-# The streaming-QA agent (DESIGN.md §6.9); calls go through the `api` section's model.
+# The streaming-QA agent (DESIGN.md §6.9).
 qa:
   mode: tools                          # tools | dump_log (the whole event log in one call, v2)
   max_rounds: 4                        # model calls per question; the last one must answer
   max_requests: 3                      # tool requests served per round
   max_frames: 16                       # frames per get_frames / get_current_view
   current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
+  # Settings over the `api` section for the QA's calls: Qwen3.8-Flash-Next served locally by vLLM
+  # (scripts/serve_llm.sh, docs/SETUP.md §2; results §35), at medium reasoning (2026-10-26).
+  api: {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-Flash-Next-FP8, timeout: 900,
+        extra_body: {reasoning_effort: medium}}
 
-# Live commentary (DESIGN.md §6.9); scripts are generated through the `api` section's model.
+# Live commentary (DESIGN.md §6.9).
 commentary:
   # The commentary is written a stretch of video at a time, as a script of timed phrases over all of
   # its sampled frames (events.sample_fps).
@@ -55,15 +59,12 @@ commentary:
   # it (generation took 10-34 s on the trial, voicing 1-5 s). Memory then knows the stretch with
   # output_delay - budget s of hindsight.
   budget: 40
-  # The generator's reasoning effort: by default the flash model thinks for 30-90 s over a stretch's
-  # 20 frames (3,000+ reasoning tokens), past the budget; "low" brings it to 10-34 s (the relay does
-  # not always honour it).
+  # The generator's reasoning effort: "low" keeps a script within the budget (Flash-Next: p50 about
+  # 6-10 s a stretch, results §42).
   reasoning: low
-  # Settings over the `api` section for the scripts alone (empty: the `api` model writes them), e.g.
-  # a model served locally by vLLM (scripts/serve_llm.sh, docs/SETUP.md §2) with its thinking off:
-  #   {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-27B-FP8,
-  #    extra_body: {chat_template_kwargs: {enable_thinking: false}}}   (and reasoning: null)
-  api: {}
+  # Settings over the `api` section for the scripts: Qwen3.8-Flash-Next served locally by vLLM
+  # (scripts/serve_llm.sh, docs/SETUP.md §2; 2026-10-25).
+  api: {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-Flash-Next-FP8, timeout: 300}
   gap: 0.3                            # s at least between two phrases
   late: 3                              # s a phrase may start after the frame it was written for (else dropped)
   late_event: 20                       # ... a phrase saying a must-say item (news, confirmation, correction)
@@ -80,7 +81,7 @@ commentary:
   # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
   # (An event aired as fact is corrected whatever its type.)
   confirm: [goal, red_card, penalty, yellow_card, substitution]
-  max_words: 16                        # per phrase (most are one to six words; a remark in a lull is longer)
+  max_words: 16                        # per phrase (most are five to ten words, as the prompt asks)
   language: English
   history: 30                          # the last phrases shown to the generator, so it carries on and does not repeat itself
   # How the match has gone so far, from memory, with every stretch (DESIGN.md §6.9): its goals,
@@ -177,9 +178,6 @@ arbiter:
   max_frames: 16                       # frames per get_frames
   crops: 8                             # pictures per get_track_crops
   context: 90                          # s around the members within which other events are listed
-  # Verdicts from the arbiter subagent (scripts/run_arbiter.py) have no measured API latency;
-  # they take effect this many seconds after the case opened (DESIGN.md §6.10 allows a fixed value).
-  fixed_latency: 30
 
 perception:
   detection:
@@ -203,6 +201,9 @@ perception:
     trt_cache: trt/jersey_fp16
     max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
 
+  # How who is who reaches the event analyzer (DESIGN.md §6.3, §7): ids_text (ID labels on the
+  # frames, identities in the text) | overlay_full (identities drawn on the frames, v2).
+  inject: ids_text
   identity:
     # Per-track votes over the cached observations (perception.identity.IdentityResolver).
     vote_every: 1                      # frames between a track's votes (v2: 15)

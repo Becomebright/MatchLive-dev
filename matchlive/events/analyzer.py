@@ -2,7 +2,7 @@
 
 The model sees the window's frames sampled at `sample_fps`, each tracked player marked only
 with a window-local ID label ("P3"), plus a text block saying who each ID is (from identity
-voting), who is nearest the ball in each frame, and where the camera cuts. It is given no
+voting), who has the ball at his feet in each frame, and where the camera cuts. It is given no
 memory summary: proposers see only pixels and perception, so they cannot echo the memory
 and hide a contradiction, and the request stays identical across ablations (shared cache).
 
@@ -22,7 +22,7 @@ import numpy as np
 
 from matchlive.common.types import Track
 from matchlive.memory.types import EVENT_TYPES
-from matchlive.perception.visualization import draw_ids
+from matchlive.perception.visualization import draw_ids, draw_tracks
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,6 @@ class Candidate:
     team: str | None                        # "home" | "away" | None
     second: float                           # when it is seen, within the half
     participants: tuple[tuple[str, tuple], ...]   # (role, track key (half, shot_id, track_id))
-    evidence: tuple[float, ...]             # seconds of the frames the model cites
     replay: bool                            # seen in a replay, so it happened earlier
     # Only for the confidence-gating baseline (DESIGN.md §10, events.ask_confidence): the model's
     # own confidence, 0-1. The method never asks for it (DESIGN.md §4).
@@ -39,11 +38,10 @@ class Candidate:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Candidate":
-        # The inverse of the __dict__ dump scripts/run_events.py writes: JSON turned the
+        # The inverse of the __dict__ dump run_live writes to windows.jsonl: JSON turned the
         # tuples into lists.
         return cls(d["type"], d["team"], d["second"],
-                   tuple((role, tuple(key)) for role, key in d["participants"]), tuple(d["evidence"]), d["replay"],
-                   d.get("confidence"))
+                   tuple((role, tuple(key)) for role, key in d["participants"]), d["replay"], d.get("confidence"))
 
 
 @dataclass(frozen=True)
@@ -59,7 +57,7 @@ Away: {away} ({away_kit} kit), defending the goal on the {away_side}.
 
 Below are {n} frames sampled at {fps} per second, in order, each preceded by its number.
 Tracked players carry an ID label (P1, P2, ...) that is only valid inside this request;
-the text after these instructions says who each ID is, as far as the tracker knows.
+{who}
 
 Report every event of these types that you can see in the frames:
 shot, goal, yellow_card, red_card, foul, substitution, penalty, free_kick, offside, corner,
@@ -88,19 +86,23 @@ Answer with JSON only:
 
 
 def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple[float, np.ndarray]],
-                  perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None]]],
-                  prematch: Mapping[str, Any], sample_fps: float, ask_confidence: bool = False) -> Request:
+                  perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None], int]],
+                  prematch: Mapping[str, Any], sample_fps: float, inject: str, ask_confidence: bool = False) -> Request:
     """`frames`: (second, BGR image) of the sampled frames; `perceived`: second ->
-    (tracks with identity, key of the track nearest the ball, number read clearly off each
-    track) at that frame (see runtime.runner.resolve_frames); `prematch`: Match.prematch.
+    (tracks with identity, key of the track with the ball at his feet, number read clearly off
+    each track, shot) at that frame (runtime.runner.frame_view); `prematch`: Match.prematch;
+    `inject` (perception.inject) how who is who reaches the model: "ids_text" (the text block)
+    or "overlay_full" (drawn on the frames, v2).
     `ask_confidence` (the confidence-gating baseline only) adds a "confidence" to each event."""
     teams, kits, sides = prematch["teams"], prematch["jersey_colors"], prematch["sides"][half]
-    block, images, pid_of = labelled_frames(frames, perceived, prematch)
+    block, images, pid_of = labelled_frames(frames, perceived, prematch, inject == "overlay_full")
     t0, t1 = window
     text = INSTRUCTIONS.format(
         window=f"half {half}, {clock(t0)}-{clock(t1)} of the half video",
         home=teams["home"], away=teams["away"], home_kit=kits["home"][0], away_kit=kits["away"][0],
-        home_side=sides["home"], away_side=sides["away"], n=len(frames), fps=sample_fps)
+        home_side=sides["home"], away_side=sides["away"], n=len(frames), fps=sample_fps,
+        who="each one's team colour and, where known, shirt number and name are drawn at his feet." if inject == "overlay_full"
+        else "the text after these instructions says who each ID is, as far as the tracker knows.")
     if ask_confidence:
         text += ('\nAlso give each event a "confidence": how sure you are, from 0 to 1, that it happened '
                  'as you report it, e.g. {"type": "shot", ..., "confidence": 0.8}.')
@@ -110,14 +112,19 @@ def build_request(half: int, window: tuple[float, float], frames: Sequence[tuple
 
 
 def labelled_frames(frames: Sequence[tuple[float, np.ndarray]],
-                    perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None]]],
-                    prematch: Mapping[str, Any]) -> tuple[str, list[str | bytes], dict[tuple, str]]:
+                    perceived: Mapping[float, tuple[Sequence[Track], tuple | None, Sequence[str | None], int]],
+                    prematch: Mapping[str, Any], overlay: bool) -> tuple[str, list[str | bytes], dict[tuple, str]]:
     """Frames as a model is shown them (the event analyzer, the QA's current view): each
     tracked player marked with a local ID label ("P3"), and a text block saying who each ID is
-    as far as identity voting knows, who is nearest the ball in each frame, and where the
-    camera cuts. Returns (text block, ["Frame k (clock)", JPEG, ...], track key -> ID)."""
+    as far as identity voting knows (and which is a goalkeeper), who has the ball at his feet
+    in each frame, and where the camera cuts. With `overlay` (perception.inject overlay_full, v2),
+    who each ID is is drawn on the frames instead (team colour, number and name at his feet) and
+    the text only lists the IDs. Returns (text block, ["Frame k (clock)", JPEG, ...], track key -> ID)."""
     players = {p["hash"]: p for p in prematch["players"]}
     teams = prematch["teams"]
+    # overlay_full: each team's kit colour (metadata "#RRGGBB" -> BGR), each player's number and name.
+    team_bgr = {side: tuple(int(prematch["jersey_colors"][side][1][i:i + 2], 16) for i in (5, 3, 1)) for side in teams}
+    labels = {pid: (str(p["jersey_number"]), p["short_name"]) for pid, p in players.items()}
 
     # Local IDs, numbered by first appearance.
     pid_of: dict[tuple, str] = {}
@@ -126,14 +133,13 @@ def labelled_frames(frames: Sequence[tuple[float, np.ndarray]],
     carriers, cuts = [], []
     prev_shot = None
     for k, (second, _) in enumerate(frames, start=1):
-        tracks, carrier, numbers = perceived.get(second, ((), None, ()))
+        tracks, carrier, numbers, shot = perceived[second]
         for t, number in zip(tracks, numbers):
             pid_of.setdefault(t.key, f"P{len(pid_of) + 1}")
             last[t.key] = t
             if number is not None:
                 seen_clear.setdefault(t.key, []).append(k)
         carriers.append(f"{k}:{pid_of[carrier]}" if carrier in pid_of else f"{k}:-")
-        shot = tracks[0].shot_id if tracks else prev_shot
         if prev_shot is not None and shot != prev_shot:
             cuts.append(str(k))
         prev_shot = shot
@@ -141,20 +147,23 @@ def labelled_frames(frames: Sequence[tuple[float, np.ndarray]],
     lines = []
     for key, pid in pid_of.items():
         t = last[key]
-        who = f"{teams[t.team]} ({t.team})" if t.team else "team unknown"
+        who = (f"{teams[t.team]} ({t.team})" if t.team else "team unknown") + (", goalkeeper" if t.role == "goalkeeper" else "")
         if t.player_id:
             p = players[t.player_id]
             who += f", #{p['jersey_number']} {p['short_name']}"
         if key in seen_clear:
             who += f"; number clearly visible in frames {_ranges(seen_clear[key])}"
         lines.append(f"{pid}: {who}")
-    block = "Player IDs:\n" + "\n".join(lines or ["(none tracked)"])
-    block += "\nNearest to the ball (frame:ID, - = ball not found): " + " ".join(carriers)
+    block = "Player IDs:\n" + "\n".join(lines or ["(none tracked)"]) if not overlay else \
+        "Player IDs: " + (", ".join(pid_of.values()) or "(none tracked)") + " (who each is is drawn on the frames)"
+    block += "\nBall at a player's feet (frame:ID, - = ball not found, or in flight or loose): " + " ".join(carriers)
     block += "\nCamera cuts just before frames: " + (", ".join(cuts) or "none")
 
     parts: list[str | bytes] = []
     for k, (second, image) in enumerate(frames, start=1):
-        tracks = perceived.get(second, ((), None, ()))[0]
+        tracks = perceived[second][0]
+        if overlay:
+            image = draw_tracks(image, tracks, team_bgr=team_bgr, labels=labels)
         image = draw_ids(image, [(pid_of[t.key], t.bbox_ltwh) for t in tracks])
         # 960x540 keeps the ID labels legible; JPEG keeps the request small.
         ok, jpg = cv2.imencode(".jpg", cv2.resize(image, (960, 540), interpolation=cv2.INTER_AREA),
@@ -178,11 +187,9 @@ def parse_candidates(text: str, request: Request) -> list[Candidate]:
         participants = tuple((str(p.get("role")), request.pids[p.get("id")])
                              for p in e.get("participants") or []
                              if isinstance(p, dict) and p.get("id") in request.pids)
-        evidence = tuple(request.seconds[k - 1] for k in e.get("evidence_frames") or []
-                         if isinstance(k, int) and 1 <= k <= n)
         team = e.get("team") if e.get("team") in ("home", "away") else None
         conf = e.get("confidence")
-        out.append(Candidate(e["type"], team, request.seconds[frame - 1], participants, evidence,
+        out.append(Candidate(e["type"], team, request.seconds[frame - 1], participants,
                              bool(e.get("replay")), float(conf) if isinstance(conf, (int, float)) else None))
     return out
 

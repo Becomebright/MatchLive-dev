@@ -36,12 +36,9 @@ def on_pitch(*extra):
 
 
 def reads(number):
-    # One frame's jersey probabilities for a track: `number` read clearly, or nothing readable.
-    p = np.full(101, np.nan, np.float32)
-    if number is not None:
-        p[:] = 0.0
-        p[int(number)] = 0.95
-    return p
+    # One frame's jersey read of a track (top label, its probability): `number` read clearly, or
+    # nothing readable.
+    return np.array([np.nan, np.nan] if number is None else [int(number), 0.95], np.float32)
 
 
 def play(resolver, frames, roster):
@@ -124,7 +121,7 @@ def test_arbiter_names_the_players_of_a_seen_substitution():
     config = copy.deepcopy(CONFIG)
     mem, checker = MatchMemory(ROSTER), ConsistencyChecker(config)
     from matchlive.events.analyzer import Candidate
-    cand = Candidate("substitution", "home", 500, (("out", (2, 3, 1)), ("in", (2, 3, 2))), (500,), False)
+    cand = Candidate("substitution", "home", 500, (("out", (2, 3, 1)), ("in", (2, 3, 2))), False)
     for n in (1, 2):                                   # two windows: confirmed, players unknown
         checker.propose(mem, (2, 520 + 10 * n), 2, (480, 510 + 10 * n), cand, f"obs:sub{n}#0", [None, None])
     [sub] = [eid for eid, e in mem.entries.items() if e.type == "substitution"]

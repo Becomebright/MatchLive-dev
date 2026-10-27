@@ -1904,3 +1904,47 @@ python scripts/run_qa.py --match "$M" --run flashnext_medium --mode tools --benc
 - 左右路：r9 前 20 分钟约对 22、错 2，与 r8 相当；后半段错得多一些（Azpilicueta 两次说成右路，Matip 两次说成左路）。
 - 赛前事实：r9 讲得太多（上半场 41 条，约每分钟一条；r8 是每 20 分钟 7 条），而且相邻两段讲同一条（K117 隔 7 s、K106 隔 8 s），因为同时在生成的几段看不到彼此选了哪条。r10 不再重复，但仍有 29 条，有几处隔十几秒就讲下一条（12:36/12:50、32:35/32:45）——给了上一条的时间，模型不总是遵守。
 - 第二个球画面里没认出 Henderson，"Henderson drives it, finishes coolly" 被名字检查丢掉，这个球没有说出进球人。
+
+## 43. 审查改动之后的整场解说和 QA（复用 gemini 的事件，2026-10-26）
+
+> 分支 `chain-review-fixes`（感知到解说整条链路审查后的改动，见 `DESIGN.md` §6.1–§6.10）。按用户决定，解说和 QA 只用本地 Flash-Next（`commentary.api`、`qa.api` 的默认值），不再用 gemini。
+
+**先重跑 live 失败：gemini 当天不思考。** 两场先用新代码重跑了 live（`full_1026`），结果明显变差：利物浦终场比分记成 0-2（实际 1-2），确认的射门从 21 降到 7，仲裁有 35 次裁决作废（`full_2xl_window` 是 0 次）。原因不在代码：缓存里的 gemini-3.8-flash 回答，分析器的推理 token 中位数在 10-20 是 2,308、10-25 是 1,037，当天 18–21 点（UTC）是 0（只有约 13% 的调用有推理）；请求和缓存键都没变。直接探测两家中转站：默认都不思考；az.gptplus5 忽略 `reasoning_effort`，openlux 认（`high` 在分析器的 10 个窗口上推理 token 中位数约 2,300，最接近 `full_2xl_window`；`medium` 约 850）。`full_1026` 留作记录，不用于对比。之后按 `--set api.endpoint=configs/api_openlux.local.yaml --set 'api.extra_body={reasoning_effort: high}'` 重跑了一部分（`full_1026_high`），用户决定停掉、先复用旧事件。注意：这两项覆盖会被读这次运行的 `run_commentary.py` 继承，解说要另给 `commentary.api` 的全部字段（带 `extra_body: {}`）。9-28、9-29 的运行（含 `confidence_gate*`）缓存里推理 token 也多为 0，原因不确定（可能是当时没思考，也可能是没报告）。
+
+**复用 `full_2xl_window` 的事件（运行名 `full_2xl_window_v5`）：** 记忆的操作日志、窗口、案件原样复制；`perceived_half<h>.pkl` 每帧补上镜头号（从感知缓存的 `shot_id`），并补上没有跟踪到球员的采样帧（现在的 runner 也写这些帧，两场四个半场共 624 帧），帧集合和新 runner 写出的一致。不调用任何 API。记忆仍是旧代码生成的，所以这次只检验 QA 和解说这一侧的改动；感知、一致性检查、仲裁、复查的改动要等 live 重跑。
+
+```
+python scripts/run_commentary.py --match "$M" --run full_2xl_window_v5 --name fn_r11_full
+python scripts/run_qa.py --match "$M" --run full_2xl_window_v5 --mode tools --benchmark dataset/streamingqa/part1_1001 --tag 1001
+python scripts/eval_commentary.py --runs fn_r7_full fn_r8_full fn_r11_full --match "$M"
+```
+
+**QA 1001（`tools`，两场合计 700 题）：** 这是 §35 没做的交叉实验，把 QA 模型和记忆分开看。
+
+| | gemini QA，gemini 记忆（`full_2xl_window`） | Flash-Next QA，gemini 记忆（`full_2xl_window_v5`） | Flash-Next QA，Flash-Next 记忆（`flashnext_medium`） |
+|---|---|---|---|
+| 利物浦 / 曼联 / 合计 | 0.876 / 0.881 / 0.879 | 0.749 / 0.728 / 0.739 | 0.703 / 0.734 / 0.719 |
+| D1 计数 | 0.643 | 0.464 | 0.500 |
+| D2 事件时间 / 球员 | 0.830 / 0.938 | 0.725 / 0.822 | 0.630 / 0.860 |
+| D3 当前事件的球员 / 球队 | 0.962 / 1.000 | 0.792 / 0.831 | 0.792 / 0.847 |
+| D4 事件顺序 | 0.737 | 0.684 | 0.579 |
+| 每题延迟 p50 / 调用次数 | 20.3 s / 2.62 | 14.3 s / 2.50 | 11.3 s / 2.53 |
+
+- 下降的大部分来自 QA 模型（0.879 → 0.739），换记忆只再降 0.02。主要看当前画面的 D3 降得最多（0.97 → 0.80），所以 Flash-Next 看图答题比 gemini 弱。注意 gemini 那列是 10-20 的旧 QA 代码，两列之间还差这次审查对 QA 工具的改动。
+
+**整场解说（`fn_r11_full`，drama-3 配音）：** 输出在 `outputs/stream/<match>/fn_r11_full/`（同 §42 的格式）。利物浦和 `fn_r8_full` 比，曼联和 `fn_r7_full` 比（曼联没有 `fn_r8_full`）；同一份记忆，所以事件说得对不对的统计三者相同（利物浦按状态说的 35 条、错 22.9%；进球、红黄牌、换人当事实说的错 0%）。
+
+| | 利物浦 `fn_r8_full` | 利物浦 `fn_r11_full` | 曼联 `fn_r7_full` | 曼联 `fn_r11_full` |
+|---|---|---|---|---|
+| 短语 | 1,223 | 1,182 | 1,236 | 1,299 |
+| 名字检查丢掉的短语 | — | 92 | — | 74 |
+| 讲的赛前事实（不同的条数） | 19（19） | 44（44） | 32（32） | 55（55） |
+| 生成延迟中位数 | 6.2 s | 11.0 s | 6.2 s | 11.1 s |
+| 射门及时说出 | 5 / 25 | 9 / 25 | 9 / 24 | 8 / 24 |
+| 开口时间占比 / 每句词数 | 56.4% / 6.9 | 50.1% / 6.2 | 57.1% / 7.1 | 52.0% / 6.2 |
+| 事件 → 新闻就绪 p50 | 84 s | 91 s | 85 s | 89 s |
+
+- 赛前事实不再隔 3 分钟（用户决定），讲得多了，但没有一条重复。
+- 生成延迟和 r10（9.8 s）相近，比 r8 长，因为 r9 起每段多给了首发阵容和比赛经过。
+- 名字检查丢掉的短语多数是门将：利物浦 60 句（Courtois、Mignolet 各 30），曼联 16 句（de Gea）。只有画面里标了"(本方), goalkeeper"时才能说本方首发门将；利物浦两名门将都穿青柠色，549 段里有 415 段标的是 "team unknown, goalkeeper"，曼联 de Gea 只在 13 段标出了球队。丢掉的多，开口时间占比就从 56–57% 降到 50–52%。
+- `eval_commentary.py` 的"点了素材里没有的球员"和解说器的名字检查口径不一致：评测只看素材和画面，不算比赛经过和"标出门将的本方首发门将"。曼联 64 句里 59 句是 Courtois（画面标了 Chelsea 的门将），其余 5 句的名字来自比赛经过（Lingard 4 句，他进了球、吃了黄牌，"There's Lingard booked" 说对了；Costa 1 句，扳平的进球）；利物浦 2 句同理。播出的短语都过了解说器的名字检查，按它的口径这一项是 0。

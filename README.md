@@ -107,7 +107,7 @@ With the labels of `docs/SETUP.md` §4 in the match folders:
 |---|---|
 | `scripts/eval_memory.py --runs full no_arbiter ...` | memory over knowledge time: events counted and held, corrections, score / lineups / counts, identities |
 | `scripts/inject_errors.py` | error injection: a substitution never reported, a card given to the wrong player — does memory recover, and how soon |
-| `scripts/run_gate.py` then `eval_memory.py` | the confidence-gating baseline on the same analyzer answers |
+| `scripts/run_live.py --name gate0.9 --set events.ask_confidence=true --set consistency.gate=0.9` then `eval_memory.py` | the confidence-gating baseline: its own live run (perception, analyzer and memory), a sighting kept only at confidence ≥ τ |
 | `scripts/eval_commentary.py` | commentary claims (fact / hedged / names / corrections) next to a status-blind commentator; timing (shots called as they happen, speaking rate) next to the broadcast's commentators |
 
 Numbers: `docs/results.md`.

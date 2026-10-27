@@ -1,6 +1,9 @@
-"""Visual check of the event analyzer on one window: what it is shown, and what it answers.
+"""Visual check of the event analyzer on one window of a live run: what it is shown, and what it answers.
 
-    python scripts/check_analyzer.py --match "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool" --half 1 --start 1000
+    python scripts/check_analyzer.py --match "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool" --run full --half 1 --start 1000
+
+The frames carry the identities the live run gave them (its perceived_half<h>.pkl: a second in two
+windows as the later one saw it).
 
 Writes outputs/check_analyzer/<match>_h<half>_<start>s/: frames.jpg (the labelled frames as
 a contact sheet), prompt.txt (the request's text) and, when the API answers (a cached
@@ -12,44 +15,42 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 
 import cv2
 import numpy as np
 
 from matchlive.common.api import APIClient, NoAPIKey
-from matchlive.common.cache import load_perception
-from matchlive.common.config import load_config
+from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 from matchlive.events.analyzer import build_request, parse_candidates
-from matchlive.runtime.runner import MatchRunner, resolve_frames
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--match", required=True)
+    ap.add_argument("--run", default="full", help="live run name (scripts/run_live.py --name)")
     ap.add_argument("--half", type=int, default=1)
     ap.add_argument("--start", type=float, required=True, help="window start, second within the half")
     ap.add_argument("--no-call", action="store_true", help="only write the request, never call the API")
     args = ap.parse_args()
 
-    config = load_config()
+    run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
+    config = load_config(overrides=run_overrides(run_dir))
     ev = config["events"]
     match = Match(config, args.match)
-    arrays, meta = load_perception(MatchRunner(config).run_perception(match, args.half))
-    fps = meta["fps"]
+    perceived = pickle.load(open(run_dir / f"perceived_half{args.half}.pkl", "rb"))
     window = (args.start, args.start + ev["window_seconds"])
-    seconds = [window[0] + k / ev["sample_fps"] for k in range(int(ev["window_seconds"] * ev["sample_fps"]))]
-    frame_of = {s: int(round(s * fps)) for s in seconds}
-
-    perceived = resolve_frames(config, match, arrays, fps, frame_of, [window])[window]
     cap = cv2.VideoCapture(str(match.video_path(args.half)))
+    fps = cap.get(cv2.CAP_PROP_FPS)
     frames = []
-    for s in seconds:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_of[s])
+    for s in sorted(s for s in perceived if window[0] <= s < window[1]):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(s * fps)))
         ok, image = cap.read()
         if ok:
             frames.append((s, image))
-    request = build_request(args.half, window, frames, perceived, match.prematch, ev["sample_fps"])
+    request = build_request(args.half, window, frames, perceived, match.prematch, ev["sample_fps"],
+                            config["perception"]["inject"], ev["ask_confidence"])
 
     out_dir = config["paths"]["outputs"] / "check_analyzer" / f"{args.match[:10]}_h{args.half}_{int(args.start)}s"
     out_dir.mkdir(parents=True, exist_ok=True)

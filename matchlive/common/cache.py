@@ -10,8 +10,9 @@ instead of re-running the models. Arrays (row order = frame order):
                                      the ball is selected from these at load time
   track    float32 (M, 8)            frame, shot_id, role (0 goalkeeper, 1 player),
                                      track_id, l, t, w, h
-  jersey   float16 (M, 101)          jersey-number probabilities of each track row, read
-                                     on every frame; NaN where the box was too small to crop
+  jersey   float32 (M, 2)            each track row's jersey read, on every frame: the most
+                                     likely label (jersey.label_to_number) and its probability;
+                                     NaN where the box was too small to crop
   color    float32 (M, 3)            mean LAB kit colour of each track row's crop
                                      (identity.kit_color); NaN where there was no crop
 
@@ -32,7 +33,7 @@ import numpy as np
 
 from matchlive.common.types import Track
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5                      # 5: the top jersey label and its probability, not all 101
 ROLE_CODE = {"goalkeeper": 0, "player": 1}
 ROLE_NAME = {code: role for role, code in ROLE_CODE.items()}
 
@@ -92,10 +93,10 @@ def load_perception(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
 
 def iter_frames(arrays: dict[str, np.ndarray]) -> Iterator[tuple[int, list[Track], np.ndarray, np.ndarray, np.ndarray]]:
     """Decode cached arrays frame by frame, in frame order: (frame_idx, tracks, jersey,
-    color, det) — the frame's Tracks (score 1.0: not cached), their jersey-probability and
+    color, det) — the frame's Tracks (score 1.0: not cached), their jersey-read and
     colour rows, and its detection rows (l, t, w, h, score, class_id). Frames with neither
     tracks nor detections are skipped."""
-    track, jersey, color, det = arrays["track"], arrays["jersey"].astype(np.float32), arrays["color"], arrays["det"]
+    track, jersey, color, det = arrays["track"], arrays["jersey"], arrays["color"], arrays["det"]
     # Rows are written in frame order, so each frame's rows form one contiguous run.
     frames = sorted(set(track[:, 0].astype(int)) | set(det[:, 0].astype(int)))
     t_start = np.searchsorted(track[:, 0], frames, side="left")

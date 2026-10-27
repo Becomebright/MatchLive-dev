@@ -189,8 +189,9 @@ class MatchMemory:
         return [c.case_id for c in self.cases.values() if c.status == "open" and entry_id in c.members]
 
     def track_players(self) -> dict[tuple, str]:
-        """{track_key: player_id} from the confirmed Identity entries. Two confirmed identities
-        for one track only happen with the consistency check off; the later-written wins."""
+        """{track_key: player_id} from the confirmed Identity entries. A verdict that names a
+        track rejects the other claims on it, so two confirmed identities for one track only
+        happen with the consistency check off; the later-written wins."""
         return {e.track_key: e.player_id for entry_id, e in self.entries.items()
                 if isinstance(e, Identity) and self.status(entry_id) == "confirmed"}
 
@@ -254,14 +255,12 @@ def _decode_entry(d: Mapping[str, Any]) -> Event | Identity:
 
 
 def _decode_justification(d: Mapping[str, Any]) -> Justification:
-    # Logs written before justifications carried participants have none.
-    return Justification(d["obs_id"], d["kind"], d["sufficient"],
-                         tuple(map(_decode_participant, d.get("participants", ()))), d.get("of"))
+    return Justification(d["obs_id"], d["kind"], d["sufficient"], tuple(map(_decode_participant, d["participants"])), d["of"])
 
 
 def _decode_participant(p: Mapping[str, Any]) -> Participant:
     return Participant(p["role"], None if p["track_key"] is None else _track_key(p["track_key"]), p["player_id"],
-                       tuple(map(_track_key, p.get("alternates", ()))))
+                       tuple(map(_track_key, p["alternates"])))
 
 
 def _track_key(key) -> tuple:

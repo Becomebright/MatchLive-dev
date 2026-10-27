@@ -65,8 +65,9 @@ each time (DESIGN.md §8).
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from matchlive.events.analyzer import clock, parse_json
 from matchlive.memory.types import Time
@@ -171,14 +172,15 @@ class CommentaryPolicy:
 
     # ---- deciding ----
 
-    def material(self, view: View, segment: tuple[int, float, float]) -> list[Item]:
+    def material(self, view: View, segment: tuple[int, float, float], held: Collection[str]) -> list[Item]:
         """What the commentary over the stretch `segment` = (half, start, end) of video must say,
         each item at the moment it belongs to. `view` is the match as known now: the
         output runs `output_delay` s behind the live feed, so memory already knows about the
-        stretch, with that much hindsight. Nothing that happens after the stretch is said."""
+        stretch, with that much hindsight. Nothing that happens after the stretch is said.
+        `held` are the entries given to stretches still being written: not news again, and an
+        event that only echoes one of them is no news either."""
         half, start, end = segment
         mem = view.mem
-        opening = mem.at((half, start), known_by=view.time)     # the match as the stretch begins
         records = {r.entry_id: r for r in view.events()}
         confirm, announce = self.cfg["confirm"], self.cfg["announce"]
         items: list[Item] = []
@@ -204,9 +206,11 @@ class CommentaryPolicy:
                 if a.status == "confirmed" or ty in confirm:
                     items.append(self._correction(view, r, a, named, "retracted", (half, start)))
                 continue
-            # A name said on air is corrected only once memory holds a different player; while the
-            # event is merely disputed (pending, so no name may be said) the line waits.
-            changed = {role: pid for role, pid in a.named.items() if named.get(role) not in (None, pid)}
+            # A name said on air is corrected once memory holds a different player, or none, for the
+            # confirmed event; while the event is merely disputed (pending, so no name may be said)
+            # the line waits.
+            changed = {role: pid for role, pid in a.named.items()
+                       if named.get(role) != pid and (r.status == "confirmed" or named.get(role) is not None)}
             if changed:
                 items.append(self._correction(view, r, a, named, "player", (half, start)))
                 continue
@@ -220,15 +224,16 @@ class CommentaryPolicy:
 
         # 3. The first stretch of a half opens it.
         if half not in self.halves_opened:
-            items.append(self._opener(opening, (half, start)))
+            items.append(self._opener(view, (half, start)))
 
         # 4. News: every unaired event the viewer sees by the end of the stretch (and saw at most
         # `recent` s before it), the most important first when one echoes another.
-        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.status != "retracted"
-                 and r.event.type in announce and self._seen(view, r, (half, end)) and self._ready(view, r)]
+        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.entry_id not in held
+                 and r.status != "retracted" and r.event.type in announce and self._seen(view, r, (half, end))
+                 and self._ready(view, r)]
         chosen: list[EventRecord] = []
         for r in sorted(fresh, key=lambda r: (announce.index(r.event.type), self._when(view, r)[1])):
-            if not self._echoes(r, records, chosen):
+            if not self._echoes(r, records, chosen + [records[eid] for eid in held if eid in records]):
                 chosen.append(r)
         for r in sorted(chosen, key=lambda r: self._when(view, r)[1]):
             # Said at the moment it happens; one the viewer saw before the stretch, first thing.
@@ -239,37 +244,60 @@ class CommentaryPolicy:
     def where(self, view: View, segment: tuple[int, float, float]) -> str:
         """The match as it stands when the stretch begins, for the generator: the time, which way
         each team attacks this half, the score and, with `story`, the match record — what the
-        viewer has seen up to the stretch, as memory knows it now: its goals, cards and
-        substitutions. "confirmed" lists the confirmed entries, and those aired while pending as
-        not confirmed yet (the viewer has heard of them; the score does not count them); "all"
-        every pending entry too. No counts of shots, corners or fouls: memory confirms only some of
-        them, so a count is short of the true one (results §41)."""
+        viewer has seen before the stretch, as memory knows it now: its goals, cards and
+        substitutions, each placed at its sighting, as the news is. "confirmed" lists the counted
+        entries, and those aired while pending as not confirmed yet (the viewer has heard of them;
+        the score does not count them) until `confirm_within` s have passed without a
+        confirmation; "all" every pending entry too. No counts of shots, corners or fouls: memory
+        confirms only some of them, so a count is short of the true one (results §41)."""
         half, start, _ = segment
-        seen = view.mem.at((half, start), known_by=view.time)
         teams = self.prematch["teams"]
-        records = [r for r in seen.events() if r.event.type in ("goal", "yellow_card", "red_card", "substitution", "penalty")
-                   and (r.status == "confirmed" or r.status == "pending" and (self.cfg["story"] == "all" or r.entry_id in self.aired))]
-        waiting = [r for r in records if r.status == "pending" and r.event.type == "goal"]
+        records = []
+        for r in view.events():
+            h, second, _ = self._when(view, r)
+            if r.event.type not in ("goal", "yellow_card", "red_card", "substitution", "penalty") or (h, second) >= (half, start):
+                continue
+            if self._counted(r):
+                records.append((r, h, second, True))
+            elif r.status == "pending" and (self.cfg["story"] == "all" or r.entry_id in self.aired) \
+                    and h == half and start - second <= self.cfg["confirm_within"]:
+                records.append((r, h, second, False))
+        score = self._goals(view, (half, start))
         out = (f"Time: {self._clock(half, start)}.\n{self._ends(half)}\n"
-               f"Score as these seconds begin: {teams['home']} {seen.score['home']}, {teams['away']} {seen.score['away']}"
-               + "".join(f" (not counted yet: {self._phrase(r.event)}, not confirmed)" for r in waiting) + ".")
+               f"Score as these seconds begin: {teams['home']} {score['home']}, {teams['away']} {score['away']}"
+               + "".join(f" (not counted yet: {self._phrase(r.event)}, not confirmed)"
+                         for r, _, _, counted in records if not counted and r.event.type == "goal") + ".")
         if self.cfg["story"] == "off":
             return out
         lines = []
-        for r in records:
-            h, second, _ = self._when(seen, r)
+        for r, h, second, counted in records:
             who = {part.role: pid for part, pid in zip(r.event.participants, r.players) if pid}
-            if r.status == "pending":
+            if not counted:
                 what = f"{self._phrase(r.event)}, not confirmed yet"
             elif r.event.type == "substitution" and "in" in who and "out" in who:
-                what = f"{teams[r.event.team]} substitution, {self.players[who['in']]['short_name']} on for " \
-                       f"{self.players[who['out']]['short_name']}"
+                what = f"{teams[self.players[who['in']]['team_side']]} substitution, {self.players[who['in']]['short_name']} " \
+                       f"on for {self.players[who['out']]['short_name']}"
             elif "player" in who:
                 what = f"{EVENT_WORDS[r.event.type]}, {self._player(who['player'], brief=True)}"
             else:
                 what = self._phrase(r.event)
             lines.append(f"- {self._clock(h, second)}: {what}")
         return out + "\nThe match record so far:\n" + ("\n".join(lines) or "- no goals, cards or substitutions yet")
+
+    def _counted(self, r: EventRecord) -> bool:
+        """Whether an event counts in the score and the record: confirmed, or aired as confirmed and
+        not retracted since — a dispute opened later (a replay taken for a new goal) leaves it
+        pending in memory, but does not take back what the viewer was told."""
+        a = self.aired.get(r.entry_id)
+        return r.status == "confirmed" or (r.status == "pending" and a is not None and a.status == "confirmed")
+
+    def _goals(self, view: View, before: Time) -> dict[str, int]:
+        """The score from the counted goals sighted before `before`."""
+        score = {"home": 0, "away": 0}
+        for r in view.events(type="goal"):
+            if r.event.team in score and self._counted(r) and self._when(view, r)[:2] < before:
+                score[r.event.team] += 1
+        return score
 
     def _ends(self, half: int) -> str:
         """Which way each team attacks this half, in the main camera's wide picture, and so where its
@@ -354,21 +382,27 @@ class CommentaryPolicy:
                     before: Aired | None = None) -> Item:
         e = r.event
         half, second, replay = self._when(view, r)
-        # News is the play on screen: no minute, and the score only with a goal.
-        facts = [f"What: {self._phrase(e)}" + (" — being shown again in a replay" if replay else "") + "."]
+        # News is the play on screen: no minute, and the score only with a goal. News first offered
+        # after its moment (late, or offered again) is said as just past, not called again.
+        past = f", {at[1] - second:.0f} s before these pictures" if kind == "news" and at[1] - second > self.cfg["late"] else ""
+        facts = [f"What: {self._phrase(e)}{past}" + (" — being shown again in a replay" if replay else "") + "."]
         for role, pid in named.items():
             facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid)}")
         if r.status == "confirmed":
             if e.type == "goal":                  # the score counts confirmed goals only, up to this one
-                facts.append(self._score(view.mem.at(e.t_interval[1], known_by=view.time), "after this goal"))
-            rule = "Call it as it happens" + (", naming the player(s) given." if named
-                                              else "; you don't know who it was, so name nobody.")
+                score = self._goals(view, (half, second))
+                if e.team in score:
+                    score[e.team] += 1
+                facts.append(self._score(score, "after this goal"))
+            rule = ("Say it as just past (\"... there\"), not as if it were happening now" if past else "Call it as it happens") \
+                + (", naming the player(s) given." if named else "; you don't know who it was, so name nobody.")
         elif e.type in self.cfg["confirm"]:
             facts.append("Not certain yet.")
-            rule = "You are not sure yet: hedge it (\"looks like...\", \"is that...?\") and name nobody, only the team."
+            rule = "You are not sure yet: hedge it (\"looks like...\", \"is that...?\")" + (" as just past" if past else "") \
+                + " and name nobody, only the team."
         else:
             # A pending minor event is simply said without a player (DESIGN.md §6.9: the team only).
-            rule = "Name nobody, only the team."
+            rule = "Name nobody, only the team" + (", and say it as just past." if past else ".")
         if kind == "confirmation":
             # Confirmed after it happened, with the play moved on: said as news about that earlier
             # moment, not called again as if it were happening now.
@@ -386,24 +420,25 @@ class CommentaryPolicy:
         e = r.event
         half, second, _ = self._when(view, r)
         facts = [f"What you said before: \"{before.text}\"", f"About: {self._phrase(e)}, in {self._clock(half, second)}."]
-        reason = _plain(self._reason(view, r.entry_id))
+        reason = self._reason(view, r.entry_id)
         if what == "retracted":
             facts.append(f"What turned out: {reason}")
             rule = ("Put it right the way a commentator does on air (\"No, ...\", \"Actually, ...\"), briefly, "
                     "with the reason in plain words.")
         else:
             for role, pid in before.named.items():
-                if named.get(role) not in (None, pid):
+                if named.get(role) != pid:
                     facts.append(f"You named {self._player(pid, brief=True)} as the {ROLE_WORDS[role]}; "
-                                 f"it was actually {self._player(named[role], brief=True)}.")
+                                 + (f"it was actually {self._player(named[role], brief=True)}." if named.get(role)
+                                    else "it is no longer known who it was."))
             facts.append(f"What turned out: {reason}")
             rule = "Put the name right the way a commentator does on air, briefly."
         if e.type == "goal":
-            facts.append(self._score(view.mem.at(e.t_interval[1], known_by=view.time), "after this"))
+            facts.append(self._score(self._goals(view, (half, second)), "without it"))
         return Item("correction", facts, rule, r.entry_id, r.status, named, (half, second), at=at)
 
     def _opener(self, view: View, at: Time) -> Item:
-        half, teams, kits = view.time[0], self.prematch["teams"], self.prematch["jersey_colors"]
+        half, teams, kits = at[0], self.prematch["teams"], self.prematch["jersey_colors"]
         facts = [f"{'Kick-off' if half == 1 else 'The second half is under way'}: {teams['home']}, in {kits['home'][0]} "
                  f"at home, against {teams['away']} in {kits['away'][0]}."]
         if half == 1:
@@ -422,7 +457,7 @@ class CommentaryPolicy:
                 if bg.get("manager"):
                     facts.append(f"{teams[side]}'s manager: {bg['manager']}.")
         else:
-            facts.append(self._score(view, "at half-time"))
+            facts.append(self._score(self._goals(view, at), "at half-time"))
         return Item("opener", facts, "Welcome the viewers and open the half in two or three short spoken sentences"
                                      + (" (where we are, who manages the sides and how they come into it)" if half == 1 else "")
                                      + ", then follow the play.", at=at)
@@ -430,10 +465,11 @@ class CommentaryPolicy:
     # ---- helpers ----
 
     def _when(self, view: View, r: EventRecord) -> tuple[int, float, bool]:
-        """(half, second, replay only): the median live sighting, else the middle of the interval."""
+        """(half, second, replay only): the median live sighting, else the middle of the interval.
+        Only sightings of this type count: a foul's paired free kick stands behind it too."""
         mem = view.mem
-        seen = [self.sources[j.obs_id]["candidate"] for _, j in mem.justifications[r.entry_id]
-                if j.obs_id in self.sources and mem.holds(j)]
+        seen = [c for _, j in mem.justifications[r.entry_id] if j.obs_id in self.sources and mem.holds(j)
+                and (c := self.sources[j.obs_id]["candidate"])["type"] == r.event.type]
         live = sorted(c["second"] for c in seen if not c["replay"])
         (half, lo), (_, hi) = r.event.t_interval
         if live:
@@ -459,11 +495,11 @@ class CommentaryPolicy:
             return "it is now in doubt"
         return "a second look at the pictures"
 
-    def _score(self, view: View, when: str) -> str:
+    def _score(self, score: Mapping[str, int], when: str) -> str:
         """"Score after this goal: Chelsea 0, Liverpool 2." — always saying which moment it is the
         score of, so it is never taken for the score at another one."""
         teams = self.prematch["teams"]
-        return f"Score {when}: {teams['home']} {view.score['home']}, {teams['away']} {view.score['away']}."
+        return f"Score {when}: {teams['home']} {score['home']}, {teams['away']} {score['away']}."
 
     def _phrase(self, e) -> str:
         """"a corner for Chelsea"; "a corner" when the side is unknown."""
@@ -490,18 +526,10 @@ class CommentaryPolicy:
         return f"{half}H {clock(second)}"
 
 
-def _plain(reason: str) -> str:
-    """A verdict's summary without the system's codes — entry and case ids, track keys, shirt
-    numbers, clock times to the tenth — which a commentator would never say."""
-    reason = re.sub(r"\(?\btracks? \d+/\d+/\d+\)?", "", reason)
-    reason = re.sub(r"\(?\b[ECI]\d+\b\)?|#\d+|\(\s*\)|\b\d{1,2}:\d{2}(\.\d+)?\b", "", reason)
-    return re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s{2,}", " ", reason)).strip()
-
-
 PROMPT = """You are the TV commentator of this football match, speaking live on air in {language}. At the end are the next
 {span:.0f} seconds of the broadcast pictures, one frame every {step:.1f} s, each with its time. Tracked players carry a
-label (P1, P2, ...); the text before the frames says who each one is, as far as is known, who is nearest the ball in
-each frame, and where the camera cuts. Write what you say over these seconds as a timed script: each phrase starts at
+label (P1, P2, ...); the text before the frames says who each one is, as far as is known, who has the ball at his
+feet in each frame, and where the camera cuts. Write what you say over these seconds as a timed script: each phrase starts at
 the frame where you say it.
 
 Talk the way a live TV commentator does:
@@ -531,8 +559,9 @@ Talk the way a live TV commentator does:
 - Left and right are a team's own, as it attacks (its left wing, its right-back), never the screen's: take them
   from which way each team attacks this half (given with the time below) and the line-ups, and only in the main
   camera's wide view; a close-up or a replay may be shot from another angle. When unsure, say no side.
-- Name a player only when the text with the pictures identifies him, the material names him or the fact you tell is
-  about him (being in the line-ups is not enough); otherwise say the team. Never say shirt numbers or the labels.
+- Name a player only when the text with the pictures identifies him (a goalkeeper it marks is his side's keeper in
+  the line-ups), the material or the match record names him, or the fact you tell is about him (being in the
+  line-ups is not enough); otherwise say the team. Never say shirt numbers or the labels.
   Say what the pictures, the material and what you know before the match (below) give: what you know before the
   match is the knowledge of players, clubs and seasons to trust and use. At most {max_words} words a phrase.
 - A lull (the ball out, a replay, a close-up), and only a lull, is where a fact you know before the match goes:
@@ -597,11 +626,11 @@ class Commentator:
         self.knowledge = knowledge
         self.lineups = lineups
 
-    def script(self, items: Sequence[Item], frames: Any, where: str, history: Sequence[tuple[float, str]],
+    def script(self, half: int, items: Sequence[Item], frames: Any, where: str, history: Sequence[tuple[float, str]],
                before: Sequence[tuple[float, float, str, Sequence[Item]]],
                told: Mapping[str, Time]) -> tuple[list[Phrase], float, str]:
         """(the phrases in time order, the call's latency in s, its call id). `frames` are the
-        stretch's pictures: an object with .text (who is who), .images (JPEGs) and .seconds (the
+        stretch's pictures of `half`: an object with .text (who is who), .images (JPEGs) and .seconds (the
         video second of each); `where` is the time and score as the stretch begins; `history` is
         what was said, as (video second it began, text); `before` are the stretches just before
         this one whose scripts are still being written, as (start, end, their pictures' text,
@@ -621,8 +650,9 @@ class Commentator:
                          for k, it in label.items()) or "(none)"
         knowledge = {k: f for k, f in self.knowledge.items() if k not in told}
         last = max(told.values(), default=None)
-        recent = "\n".join(f"- {clock(t)} {text}" for t, text in history[-self.cfg["history"]:]) or "(none yet)"
-        earlier = "\n".join(f"- {clock(a)}-{clock(b)}: on the ball {_on_ball(text) or '(not seen)'}"
+        at = CommentaryPolicy._clock
+        recent = "\n".join(f"- {at(half, t)} {text}" for t, text in history[-self.cfg["history"]:]) or "(none yet)"
+        earlier = "\n".join(f"- {at(half, a)}-{clock(b)}: on the ball {_on_ball(text) or '(not seen)'}"
                             + (f"; given to say: {' '.join(f for it in its for f in it.facts)}" if its else "")
                             for a, b, text, its in before) or "(nothing)"
         step = seconds[1] - seconds[0] if len(seconds) > 1 else 0.5
@@ -635,22 +665,24 @@ class Commentator:
                                phrases=phrases, room=phrases * n, max_words=self.cfg["max_words"],
                                lineups=self.lineups,
                                knowledge="\n".join(f"- {k} {f}" for k, f in knowledge.items()) or "(nothing)",
-                               last=f"; the last one was told at {last[0]}H {clock(last[1])}" if last else "; none yet",
+                               last=f"; the last one was told at {at(*last)}" if last else "; none yet",
                                where=where, history=recent, before=earlier, must=must)
         parts = [prompt, frames.text]
         for k, (s, jpg) in enumerate(zip(seconds, frames.images), start=1):
-            parts += [f"Frame {k} ({clock(s)})", jpg]
+            parts += [f"Frame {k} ({at(half, s)})", jpg]
         parts.append(ANSWER)
         result = self.generate(parts)
         script = _script(parse_json(result.text), seconds, label, knowledge)
-        # Names only from the pictures' who-is-who, the material and the fact a phrase tells; never
-        # a track label ("P3").
-        given = _named("\n".join([frames.text] + [f for it in items for f in it.facts]), self.players)
+        # Names only from the pictures' who-is-who (a goalkeeper it marks is his side's starting
+        # keeper), the material, the match record and the fact a phrase tells; never a track label ("P3").
+        given = _named("\n".join([frames.text, where] + [f for it in items for f in it.facts]), self.players)
+        given |= {p["hash"] for p in self.players if p["starting"] and p["position"] == "goalkeeper"
+                  and re.search(rf"^P\d+: [^;\n]*\({p['team_side']}\), goalkeeper", frames.text, re.M)}
         kept = []
         for p in script:
             about = _named(self.knowledge[p.fact], self.players) if p.fact else set()
             if not _named(p.text, self.players) <= given | about or re.search(r"\bP\d+\b", p.text):
-                print(f"{clock(p.at)} names what it was not given: dropped {p.text!r}", flush=True)
+                print(f"{at(half, p.at)} names what it was not given: dropped {p.text!r}", flush=True)
                 continue
             kept.append(p)
         return kept, result.latency, result.call_id
@@ -659,12 +691,10 @@ class Commentator:
 def _script(answer: Mapping[str, Any], seconds: Sequence[float], label: Mapping[str, Item],
             knowledge: Mapping[str, str]) -> list[Phrase]:
     """The model's script -> phrases in time order; a phrase with no text or an unknown frame is
-    dropped, an unknown energy is "lively", an unknown material item or fact is none."""
+    dropped, an unknown energy is "lively", an unknown material item or fact is none. An answer
+    with no script raises (the stretch is lost, and logged so)."""
     out = []
-    phrases = answer.get("script")
-    for p in phrases if isinstance(phrases, list) else []:
-        if not isinstance(p, dict):
-            continue
+    for p in answer["script"]:
         text, k = str(p.get("say") or "").strip(), p.get("frame")
         if not text or not isinstance(k, int) or not 1 <= k <= len(seconds):
             continue
@@ -675,8 +705,8 @@ def _script(answer: Mapping[str, Any], seconds: Sequence[float], label: Mapping[
 
 
 def _on_ball(pictures: str) -> str:
-    """Who had the ball over a stretch, from its pictures' text: the player nearest the ball
-    frame by frame, by name where the who-is-who has one, else by team ("Milner, Liverpool,
+    """Who had the ball over a stretch, from its pictures' text: the player with the ball at his
+    feet frame by frame, by name where the who-is-who has one, else by team ("Milner, Liverpool,
     Costa"), repeats merged."""
     who = {}
     for line in pictures.splitlines():
@@ -684,15 +714,21 @@ def _on_ball(pictures: str) -> str:
         if m and "team unknown" not in m[2]:
             # "Liverpool (away), #7 Milner" -> "Milner"; "Chelsea (home)" -> "Chelsea"
             who[m[1]] = m[2].split("#", 1)[1].split(" ", 1)[1] if "#" in m[2] else m[2].split(" (")[0]
-    ball = next((line for line in pictures.splitlines() if line.startswith("Nearest to the ball")), "")
+    ball = next((line for line in pictures.splitlines() if line.startswith("Ball at a player's feet")), "")
     seq = [who[p] for p in re.findall(r"\d+:(P\d+)", ball) if p in who]
     return ", ".join(n for i, n in enumerate(seq) if i == 0 or n != seq[i - 1])
 
 
 def _named(text: str, players: Sequence[Mapping[str, Any]]) -> set[str]:
-    """The roster players (their hashes) `text` names, by full or short name."""
+    """The roster players (their hashes) `text` names, by full or short name, accents and case aside
+    ("Mané" is Mane)."""
+    text = _fold(text)
     return {p["hash"] for p in players
-            if any(re.search(r"\b" + re.escape(n) + r"\b", text) for n in (p["long_name"], p["short_name"]))}
+            if any(re.search(r"\b" + re.escape(_fold(n)) + r"\b", text) for n in (p["long_name"], p["short_name"]))}
+
+
+def _fold(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).casefold()
 
 
 def speaking_time(text: str, words_per_second: float) -> float:

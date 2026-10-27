@@ -107,11 +107,13 @@ def instructions(config: Mapping[str, Any], round: int) -> str:
 
 
 def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapping[str, Mapping[str, Any]],
-                 prematch: Mapping[str, Any], context: float) -> str:
+                 prematch: Mapping[str, Any], near: float) -> str:
     """The case as text: `observations` maps an observation id to what produced it (the
-    analyzer window and candidate); `context` s around the members lists neighbouring events."""
+    analyzer window and candidate); `near` s around the members lists neighbouring events."""
     teams, kits, sides = prematch["teams"], prematch["jersey_colors"], prematch["sides"]
-    view = mem.at(t_bound, known_by=t_bound)
+    # Every entry known when the case opened, whatever its interval (a substitution counts 45 s
+    # after its sighting, but is known from the sighting on).
+    view = mem.at((3, 0.0), known_by=t_bound)
     track_players = mem.track_players()
     lines = [f"Case {case.case_id} — {case.constraint}: {RULES.get(case.constraint, '')}",
              f"The case opened at half {t_bound[0]}, {clock(t_bound[1])}.",
@@ -119,7 +121,13 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
                f"of the main camera's picture in half 1 and on the {sides[2][side]} in half 2." for side in ("home", "away")),
              "", "Members:"]
     spans = []
-    for m in case.members:
+    # The standing entries a new one clashes with come as context (DESIGN.md §6.4): not in
+    # doubt themselves, but their observations may be rejected too.
+    context = [e for e in case.evidence if e in mem.entries]
+    for m in [*case.members, "context", *context] if context else case.members:
+        if m == "context":
+            lines += ["", "Standing entries it clashes with (not members: they stay as they are unless you rule on them):"]
+            continue
         if m not in mem.entries:
             lines.append(f"- observation {m}: {_observation(m, observations, prematch)}")
             continue
@@ -140,8 +148,8 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
             lines.append(f"    · {j.obs_id} ({j.kind}, {state}): {_observation(j.obs_id, observations, prematch)}")
     # Independent sources merged into the case after it opened and not shown above (e.g. more
     # tracks reading the same off-pitch player's number).
-    shown = {j.obs_id for m in case.members if m in mem.entries for _, j in mem.justifications[m]}
-    merged = [e for e in dict.fromkeys(case.evidence) if e not in case.members and e not in shown]
+    shown = {j.obs_id for m in [*case.members, *context] if m in mem.entries for _, j in mem.justifications[m]}
+    merged = [e for e in dict.fromkeys(case.evidence) if e not in case.members and e not in shown and e not in mem.entries]
     if merged:
         lines += ["", "Further observations merged into this case:"]
         lines += [f"- observation {e}: {_observation(e, observations, prematch)}" for e in merged]
@@ -159,8 +167,8 @@ def build_packet(mem: MatchMemory, case: Case, t_bound: Time, observations: Mapp
         lines += ["", "Other events memory holds nearby:"]
         for r in view.events():
             (h, lo), (_, hi) = r.event.t_interval
-            if r.entry_id not in case.members and any(h == sh and lo - context <= shi and slo <= hi + context
-                                                      for sh, slo, shi in spans):
+            if r.entry_id not in case.members and r.entry_id not in context \
+                    and any(h == sh and lo - near <= shi and slo <= hi + near for sh, slo, shi in spans):
                 lines.append(f"- {r.entry_id}: {r.event.type}, team {r.event.team}, half {h} {clock(lo)}–{clock(hi)}"
                              f" [{r.status}]")
     lines += ["", "Roster (hash: side, number, name):"]

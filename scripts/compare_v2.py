@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 
 from export_jersey_onnx import remap_state_dict   # sibling script (scripts/ is on sys.path)
-from matchlive.common.cache import iter_frames, load_perception
+from matchlive.common.cache import cache_path, iter_frames, load_perception
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
 from matchlive.perception.detection import session_providers, to_detections
@@ -57,7 +57,8 @@ def load_v2(config, checkpoints):
     detector.session = ort.InferenceSession(
         str(checkpoints / "rfdetr-2xl.onnx"),
         providers=session_providers({"providers": ["tensorrt", "cuda"], "fp16": True,
-                                     "trt_cache": "trt/rfdetr-2xl_fp16"}, config["paths"]["cache"]))
+                                     "trt_cache": "trt/rfdetr-2xl_fp16"}, checkpoints / "rfdetr-2xl.onnx",
+                                    config["paths"]["cache"]))
     reader = v2_jersey.JerseyReader(str(checkpoints / "dinov3-convnext-tiny"),
                                     str(checkpoints / config["perception"]["jersey"]["checkpoint"]), device="cuda")
     return detector, V2Tracker, V2Resolver, reader, v2_draw
@@ -74,7 +75,9 @@ def main():
     checkpoints = config["paths"]["checkpoints"]
     match = Match(config, args.match)
     metadata = match.metadata
-    arrays, meta = load_perception(MatchRunner(config).run_perception(match, args.half))
+    # The half's cache if it is there; the models (TensorRT sessions on the GPU) only to make it.
+    path = cache_path(config, match.video_path(args.half), match.name, args.half, 0, None)
+    arrays, meta = load_perception(path if path.exists() else MatchRunner(config).run_perception(match, args.half))
     ours = {f: rest for f, *rest in iter_frames(arrays)}
     roster = roster_index(metadata["players"])
     team_bgr = kit_bgr(metadata["jersey_colors"])
