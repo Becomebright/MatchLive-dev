@@ -86,16 +86,18 @@ def draw_ids(frame: np.ndarray, boxes: Sequence[tuple[str, tuple[float, float, f
 
 
 def nearest_to_ball(players: Sequence[Detection], ball_point: tuple[int, int] | None) -> Detection | None:
-    # Player whose feet (box bottom-center) are closest to the ball point.
-    # Squared distance is enough for an argmin; no need for the sqrt.
+    # The player whose feet (box bottom-center) are closest to the ball point, if the ball is
+    # within one of his box heights of them — at his feet, at any zoom; otherwise none (the ball
+    # in flight or loose). Squared distances are enough; no need for the sqrt.
     if ball_point is None or not players:
         return None
     bx, by = ball_point
-    return min(
-        players,
-        key=lambda t: (t.bbox_ltwh[0] + t.bbox_ltwh[2] / 2 - bx) ** 2
-        + (t.bbox_ltwh[1] + t.bbox_ltwh[3] - by) ** 2,
-    )
+
+    def dist2(t):
+        return (t.bbox_ltwh[0] + t.bbox_ltwh[2] / 2 - bx) ** 2 + (t.bbox_ltwh[1] + t.bbox_ltwh[3] - by) ** 2
+
+    near = min(players, key=dist2)
+    return near if dist2(near) <= near.bbox_ltwh[3] ** 2 else None
 
 
 def _inverted_triangle(img, center_x: int, tip_y: int, width: int, color):

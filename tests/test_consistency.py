@@ -35,7 +35,7 @@ class Feed:
         # players: role=(track_id, player_id or None); tracks live in shot 1 of half 1.
         self.n += 1
         parts = tuple((role, (1, 1, track)) for role, (track, _) in players.items())
-        cand = Candidate(type, team, second, parts, (second,), replay)
+        cand = Candidate(type, team, second, parts, replay)
         window = window or (second - 15, second + 15)
         self.checker.tick(self.mem, (1, t_known))
         return self.checker.propose(self.mem, (1, t_known), 1, window, cand, f"obs:call{self.n}#0",
@@ -112,7 +112,7 @@ def test_replay_off_takes_the_replay_for_a_second_goal():
     g = feed(130, "goal", "home", 100, player=(7, "h1"))
     assert feed(190, "goal", "home", 150, replay=True, window=(140, 170), player=(9, "h1")) != g
     [case] = cases(mem, "kickoff_after_goal")
-    assert g in case.members
+    assert g in case.evidence and g not in case.members
 
 
 def test_two_shots_in_one_window_stay_two_events():
@@ -130,8 +130,9 @@ def test_unflagged_goal_replay_opens_a_kickoff_case():
     feed(145, "goal", "home", 100, player=(7, "h1"))          # confirmed by a second window
     g2 = feed(170, "goal", "home", 130)
     [case] = cases(mem, "kickoff_after_goal")
-    assert set(case.members) == {g1, g2}
-    assert mem.at((1, 200)).score["home"] == 0                  # both held pending until the arbiter rules
+    # Only the new goal is in doubt; the standing one goes with the case as context and still counts.
+    assert set(case.members) == {g2} and g1 in case.evidence
+    assert mem.at((1, 200)).score["home"] == 1
     # A goal after a real restart is no conflict.
     feed(400, "goal", "home", 380)
     assert len(cases(mem, "kickoff_after_goal")) == 1
@@ -142,7 +143,7 @@ def test_duplicate_card_is_caught_before_it_becomes_a_red():
     y1 = feed(130, "yellow_card", "home", 100, player=(5, "h2"))
     y2 = feed(155, "yellow_card", "home", 125, player=(6, "h2"))
     [case] = cases(mem, "duplicate_card")
-    assert set(case.members) == {y1, y2}
+    assert set(case.members) == {y2} and y1 in case.evidence
     assert not any(c.derived for c in mem.at((1, 200)).cards)   # no red card inferred
     # Two different identified players carded close together is ordinary play.
     feed(300, "yellow_card", "away", 280, player=(8, "a1"))
@@ -216,11 +217,54 @@ def test_consistency_off_is_the_v2_baseline():
     assert mem.at((1, 200)).score["home"] == 2                  # the replay counted as a goal
 
 
+def test_a_sighting_matching_two_entries_opens_one_case():
+    feed = setup(); mem = feed.mem
+    feed(130, "goal", "home", 100)
+    feed(150, "goal", "home", 125)                              # no time for a kick-off: one case
+    c = feed(170, "goal", "home", 112)                           # overlaps both
+    # Which of the two it is a sighting of is the arbiter's call, in one case.
+    assert [x.constraint for x in mem.cases.values() if c in x.members] == ["ambiguous_match"]
+
+
+def test_two_events_in_one_answer_and_two_changes_at_once_stay_apart():
+    feed = setup(); mem, checker = feed.mem, feed.checker
+    # One answer reports two shots by one side 4 s apart: the model told them apart.
+    a = checker.propose(mem, (1, 130), 1, (90, 120), Candidate("shot", "home", 100, (), False), "obs:one#0", [])
+    b = checker.propose(mem, (1, 130), 1, (90, 120), Candidate("shot", "home", 104, (), False), "obs:one#1", [])
+    assert a != b and mem.status(a) == mem.status(b) == "pending"
+    # Two home changes a few seconds apart, each going-off player named: two substitutions.
+    s1 = feed(300, "substitution", "home", 280, out=(5, "h1"))
+    s2 = feed(310, "substitution", "home", 285, out=(6, "h2"))
+    assert s1 != s2 and not cases(mem, "claims_disagree")
+
+
+def test_a_foul_and_its_free_kick_stand_on_their_own_sightings():
+    feed = setup(); mem = feed.mem
+    foul = feed(130, "foul", "away", 100)
+    kick = feed(150, "free_kick", "home", 110)
+    assert mem.status(foul) == mem.status(kick) == "confirmed"   # each the other's second source
+    # The free kick was no free kick: it falls, and the foul is back to its own lone sighting.
+    mem.reject_observation((1, 300), "obs:call2#0")
+    assert mem.status(kick) == "retracted" and mem.status(foul) == "pending"
+
+
+def test_with_the_check_off_there_are_no_cases_and_a_change_counts_once():
+    feed = setup(consistency=False); mem = feed.mem
+    feed(130, "shot", "home", 100, player=(7, "h1"))
+    feed(150, "shot", "home", 104, player=(7, "h2"))             # the same track read as another player
+    assert not mem.cases
+    # Every candidate is its own entry: the same change reported twice fields the substitute once.
+    feed(300, "substitution", "home", 280, out=(5, "h1"), **{"in": (6, "h4")})
+    feed(330, "substitution", "home", 285, out=(5, "h1"), **{"in": (6, "h4")})
+    on = mem.at((1, 600)).on_field["home"]
+    assert on.count("h4") == 1 and "h1" not in on
+
+
 def recheck(feed, eid, t_known, type, team, second, **players):
     """A re-check's candidate for entry `eid` (DESIGN.md §6.4)."""
     feed.n += 1
     parts = tuple((role, (1, 1, track)) for role, (track, _) in players.items())
-    cand = Candidate(type, team, second, parts, (second,), False)
+    cand = Candidate(type, team, second, parts, False)
     return feed.checker.recheck(feed.mem, (1, t_known), eid, 1, (second - 15, second + 15), cand,
                                 f"obs:call{feed.n}#0", [p for _, p in players.values()])
 

@@ -38,15 +38,19 @@ loop:
   # evidence for the consistency check. Off: votes over the whole squad (v2).
   state_to_perception: true
 
-# The streaming-QA agent (DESIGN.md §6.9); calls go through the `api` section's model.
+# The streaming-QA agent (DESIGN.md §6.9).
 qa:
   mode: tools                          # tools | dump_log (the whole event log in one call, v2)
   max_rounds: 4                        # model calls per question; the last one must answer
   max_requests: 3                      # tool requests served per round
   max_frames: 16                       # frames per get_frames / get_current_view
   current_view: 8                      # s of video get_current_view shows, up to the question time (2 fps)
+  # Settings over the `api` section for the QA's calls: Qwen3.8-Flash-Next served locally by vLLM
+  # (scripts/serve_llm.sh, docs/SETUP.md §2; results §35), at medium reasoning (2026-10-26).
+  api: {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-Flash-Next-FP8, timeout: 900,
+        extra_body: {reasoning_effort: medium}}
 
-# Live commentary (DESIGN.md §6.9); scripts are generated through the `api` section's model.
+# Live commentary (DESIGN.md §6.9).
 commentary:
   # The commentary is written a stretch of video at a time, as a script of timed phrases over all of
   # its sampled frames (events.sample_fps).
@@ -55,23 +59,18 @@ commentary:
   # it (generation took 10-34 s on the trial, voicing 1-5 s). Memory then knows the stretch with
   # output_delay - budget s of hindsight.
   budget: 40
-  # The generator's reasoning effort: by default the flash model thinks for 30-90 s over a stretch's
-  # 20 frames (3,000+ reasoning tokens), past the budget; "low" brings it to 10-34 s (the relay does
-  # not always honour it).
+  # The generator's reasoning effort: "low" keeps a script within the budget (Flash-Next: p50 about
+  # 6-10 s a stretch, results §42).
   reasoning: low
-  # Settings over the `api` section for the scripts alone (empty: the `api` model writes them), e.g.
-  # a model served locally by vLLM (scripts/serve_llm.sh, docs/SETUP.md §2) with its thinking off:
-  #   {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-27B-FP8,
-  #    extra_body: {chat_template_kwargs: {enable_thinking: false}}}   (and reasoning: null)
-  api: {}
+  # Settings over the `api` section for the scripts: Qwen3.8-Flash-Next served locally by vLLM
+  # (scripts/serve_llm.sh, docs/SETUP.md §2; 2026-10-25).
+  api: {endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-Flash-Next-FP8, timeout: 300}
   gap: 0.3                            # s at least between two phrases
   late: 3                              # s a phrase may start after the frame it was written for (else dropped)
   late_event: 20                       # ... a phrase saying a must-say item (news, confirmation, correction)
-  context_every: 90                    # s on air between lines on how the match stands (score, counts, pressure)
-  context_stale: 600                   # s after which an angle on the match may be said again unchanged
-  background_every: 60                 # s on air at least between two pre-match facts said over the pictures
   recent: 120                          # s: a goal, card, penalty or substitution is news if the viewer saw it at most this long ago
   recent_minor: 30                     # s: ... a shot, corner, foul, free kick, offside (later, it is stale)
+  confirm_within: 60                   # s: an aired pending event confirmed later than this after it happened goes unconfirmed on air
   hold: 5                              # s a pending event waits for its confirmation before it may go on air
   # A pending shot, corner, foul, ... goes on air (naming no one) after the hold. Off: minor events
   # only once confirmed — half the pending ones are false (dry runs, results §25).
@@ -82,29 +81,38 @@ commentary:
   # Aired while pending: aired again once confirmed; aired and then retracted: corrected on air.
   # (An event aired as fact is corrected whatever its type.)
   confirm: [goal, red_card, penalty, yellow_card, substitution]
-  max_words: 16                        # per phrase (most are one to six words; a remark in a lull is longer)
+  max_words: 16                        # per phrase (most are five to ten words, as the prompt asks)
   language: English
   history: 30                          # the last phrases shown to the generator, so it carries on and does not repeat itself
+  # How the match has gone so far, from memory, with every stretch (DESIGN.md §6.9): its goals,
+  # cards and substitutions. confirmed (and those aired while pending, as not confirmed yet) |
+  # all (every pending entry too) | off (time and score only).
+  story: confirmed
   words_per_second: 2.5                # speaking rate, for a phrase with no audio to measure
+  # How much a script is told its stretch holds: `room` of its time spoken (the broadcast's
+  # commentators: 69%), in phrases of `phrase_words` words (theirs: 6.9), each taking
+  # a + b * words s to say (drama-3: 0.34 + 0.31 * words).
+  room: 0.6                            # 0.7 talked over 74% once phrases grew longer (results §40)
+  phrase_words: 6
+  phrase_time: [0.4, 0.3]
   # The broadcast output runs this far behind the live feed (DESIGN.md §6.9 D3): it absorbs the
   # 30-90 s memory needs to learn of an event, a stretch's length and its script. 60 s was too
   # short for the slowest tenth of the lines (p90 about 80 s, results §22/§25), hence 120 s (2026-10-20).
   output_delay: 120
-  # The commentator's voice (text-to-speech through the api endpoints): each phrase is voiced on its
-  # own, and the energy its script gives it picks the delivery instruction.
+  # The commentator's voice (text-to-speech): each phrase is voiced on its own, and the energy its
+  # script gives it picks the delivery. fishaudio/drama-3 (2026-10-24, results §36), served locally
+  # (scripts/serve_tts.sh, api.speech_endpoint): it clones a reference recording's voice and
+  # delivery and takes no instruction, so each energy is a recording made in that manner
+  # (checkpoints/tts/<name>.wav, its transcript in <name>.txt; made with gemini-3.8-flash-tts's
+  # Fenrir voice, results §36). About 0.4 s a phrase.
   voice:
-    model: gpt-4o-mini-tts
-    voice: ash
+    model: fishaudio/drama-3
+    voice: default
     tones:
-      calm: "Live British football TV commentary in a lull (the ball out of play, a replay, a stoppage): relaxed,
-        conversational, unhurried, a seasoned commentator chatting to the viewers over the crowd."
-      lively: "Live British football TV commentary following the ball: quick, clipped and punchy, the natural cadence
-        of a broadcast commentator calling the play as it happens, a lift on players' names; never like a narrator
-        reading."
-      rising: "Live British football TV commentary as an attack builds towards the box: faster and louder, urgency and
-        anticipation rising in the voice."
-      excited: "Live British football TV commentary at the big moment (a shot, a save, a goal): shouting with
-        excitement over a roaring crowd, fast, loud, the voice soaring."
+      calm: checkpoints/tts/fenrir_calm
+      lively: checkpoints/tts/fenrir_lively
+      rising: checkpoints/tts/fenrir_rising
+      excited: checkpoints/tts/fenrir_excited
 
 # The delayed live stream with commentary (scripts/render_stream.py).
 render:
@@ -126,6 +134,9 @@ api:
   model: gemini-3.8-flash
   cache: api
   speech_cache: tts                    # text-to-speech audio, under paths.cache
+  # Text-to-speech goes to the endpoints of this local file instead (the voice model served
+  # locally, scripts/serve_tts.sh):  endpoints: [{base_url: "http://localhost:8091/v1", api_key: EMPTY}]
+  speech_endpoint: configs/tts.local.yaml
   max_attempts: 8                      # a failed attempt is retried on the next endpoint at once; after a round on all of them, with backoff (5 s doubling, at most max_backoff)
   max_backoff: 120                     # s; on a long overload with fast 503s a shorter cap gets through sooner
   timeout: 180                         # s per request; a request past it fails and is retried
@@ -167,9 +178,6 @@ arbiter:
   max_frames: 16                       # frames per get_frames
   crops: 8                             # pictures per get_track_crops
   context: 90                          # s around the members within which other events are listed
-  # Verdicts from the arbiter subagent (scripts/run_arbiter.py) have no measured API latency;
-  # they take effect this many seconds after the case opened (DESIGN.md §6.10 allows a fixed value).
-  fixed_latency: 30
 
 perception:
   detection:
@@ -193,6 +201,9 @@ perception:
     trt_cache: trt/jersey_fp16
     max_batch: 32                      # crops per inference call; TensorRT engine is built for 1..max_batch
 
+  # How who is who reaches the event analyzer (DESIGN.md §6.3, §7): ids_text (ID labels on the
+  # frames, identities in the text) | overlay_full (identities drawn on the frames, v2).
+  inject: ids_text
   identity:
     # Per-track votes over the cached observations (perception.identity.IdentityResolver).
     vote_every: 1                      # frames between a track's votes (v2: 15)

@@ -20,11 +20,9 @@ def lab(bgr):
 
 
 def reads(number):
-    p = np.full(101, np.nan, np.float32)
-    if number is not None:
-        p[:] = 0.0
-        p[int(number)] = 0.95
-    return p
+    # One frame's jersey read of a track (top label, its probability): `number` read clearly, or
+    # nothing readable.
+    return np.array([np.nan, np.nan] if number is None else [int(number), 0.95], np.float32)
 
 
 def window(first_read_frame, n_frames=30):

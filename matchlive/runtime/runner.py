@@ -5,9 +5,7 @@ MatchRunner makes one pass over a half video and writes the raw perception cache
 identity voting frame by frame (fed by memory, loop.state_to_perception), the event analyzer
 on every fixed window, the consistency check and the arbiter — each API answer taking effect
 at its issue time + measured latency, as it would live. run_commentary() drives the commentary
-over a live run's memory on the same clock. replay_events() is the older loop over
-analyzer answers cached by scripts/run_events.py, kept for the subagent arbiter
-(scripts/run_arbiter.py).
+over a live run's memory on the same clock.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ from matchlive.common.types import Detection, Track
 from matchlive.memory.store import MatchMemory
 from matchlive.perception.detection import RFDETRDetector, to_detections
 from matchlive.perception.identity import IdentityResolver, kit_color, kit_lab, roster_index
-from matchlive.perception.jersey import NUM_LABELS, UNREADABLE, JerseyReader, crop_upper_body, label_to_number
+from matchlive.perception.jersey import UNREADABLE, JerseyReader, crop_upper_body, label_to_number
 from matchlive.perception.shots import ShotDetector
 from matchlive.perception.tracking import PlayerTracker, select_ball
 from matchlive.perception.visualization import nearest_to_ball
@@ -94,13 +92,15 @@ class MatchRunner:
             t2 = time.perf_counter()
             tracks = tracker.update(dets, frame, shot_id)
             t3 = time.perf_counter()
-            # Read every track on every frame; boxes too small to crop get NaN rows so the
-            # jersey and colour arrays stay aligned with the track rows.
+            # Read every track on every frame, keeping the top label and its probability; boxes
+            # too small to crop get NaN rows so the jersey and colour arrays stay aligned with
+            # the track rows.
             crops = [crop_upper_body(frame, t.bbox_ltwh) for t in tracks]
-            probs = np.full((len(tracks), NUM_LABELS), np.nan, dtype=np.float32)
+            reads = np.full((len(tracks), 2), np.nan, dtype=np.float32)
             readable = [i for i, c in enumerate(crops) if c is not None]
             if readable:
-                probs[readable] = self.jersey.predict_batch([crops[i] for i in readable])
+                probs = self.jersey.predict_batch([crops[i] for i in readable])
+                reads[readable] = np.stack([probs.argmax(1), probs.max(1)], axis=1)
             t4 = time.perf_counter()
             colors = np.full((len(tracks), 3), np.nan, dtype=np.float32)
             for i in readable:
@@ -110,7 +110,7 @@ class MatchRunner:
             shot_ids.append(shot_id)
             det_rows += [(frame_idx, *d.bbox_ltwh, d.score, d.class_id) for d in dets]
             track_rows += [(frame_idx, shot_id, ROLE_CODE[t.role], t.track_id, *t.bbox_ltwh) for t in tracks]
-            jersey_rows.append(probs)
+            jersey_rows.append(reads)
             color_rows.append(colors)
             # "decode" is the time spent getting this frame from the iterator.
             for key, dt in zip(timing, (t0 - t_prev, t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)):
@@ -123,7 +123,7 @@ class MatchRunner:
             "shot_id": np.asarray(shot_ids, dtype=np.int32),
             "det": np.asarray(det_rows, dtype=np.float32).reshape(-1, 7),
             "track": np.asarray(track_rows, dtype=np.float32).reshape(-1, 8),
-            "jersey": np.concatenate(jersey_rows or [np.zeros((0, NUM_LABELS))]).astype(np.float16),
+            "jersey": np.concatenate(jersey_rows or [np.zeros((0, 2))]).astype(np.float32),
             "color": np.concatenate(color_rows or [np.zeros((0, 3))]).astype(np.float32),
         }
         # Real time at 25 fps means every frame, not just the average, fits in 40 ms.
@@ -134,152 +134,20 @@ class MatchRunner:
         return arrays, {"ms_per_frame": {k: 1000 * v / n for k, v in timing.items()}, "total_ms": total_ms}
 
 
-def resolve_frames(config: dict[str, Any], match: Match, arrays: dict[str, np.ndarray], fps: float,
-                   frame_of: dict[float, int], windows: list[tuple[float, float]]
-                   ) -> dict[tuple[float, float], dict[float, tuple[list[Track], tuple | None, list[str | None]]]]:
-    """Replay identity voting over a half's raw perception cache and resolve it window by window
-    (DESIGN.md §6.1 identity (f)): the votes are cast frame by frame, and when a window ends, the
-    window's sampled frames (`frame_of`: sampled second -> frame, those with window start <=
-    second < window end) are resolved with the votes up to that point, so a track is named from
-    the whole window's reads and not from the reads before each frame.
-
-    Returns window -> {second -> (tracks with team / player_id, the key of the track nearest the
-    ball or None, the number read clearly off each track in this frame or None)}. Seconds
-    shared by two windows appear in both, each as that window saw it; frames without tracks or
-    detections are absent. Votes over the whole squad without memory (the §7
-    loop.state_to_perception baseline); run_live() does the same with the on-pitch roster and
-    identities from memory.
-    """
-    roster = roster_index(match.prematch["players"])
-    resolver = IdentityResolver(config["perception"]["identity"], kit_lab(match.prematch["jersey_colors"]))
-    sampled = set(frame_of.values())
-    raw: dict[int, tuple] = {}            # sampled frame -> (tracks, jersey, detections) of it
-    out = {}
-
-    def close(window):
-        out[window] = {}
-        for s, f in frame_of.items():
-            if window[0] <= s < window[1] and f in raw:
-                tracks, jersey, det = raw[f]
-                out[window][s] = frame_view(config, resolver.resolve(tracks, roster, {}), jersey, det)
-
-    pending = list(windows)
-    for frame_idx, tracks, jersey, color, det in iter_frames(arrays):
-        while pending and pending[0][1] <= frame_idx / fps:
-            close(pending.pop(0))
-        resolver.vote(frame_idx, tracks, jersey, color)
-        if frame_idx in sampled:
-            raw[frame_idx] = (tracks, jersey, det)
-    for window in pending:
-        close(window)
-    return out
-
-
-def frame_view(config: dict[str, Any], tracks: list[Track], jersey: np.ndarray,
-               det: np.ndarray) -> tuple[list[Track], tuple | None, list[str | None]]:
+def frame_view(config: dict[str, Any], tracks: list[Track], jersey: np.ndarray, det: np.ndarray,
+               shot: int) -> tuple[list[Track], tuple | None, list[str | None], int]:
     """One frame as the event analyzer is told about it: (tracks with identity, the key of the
-    track nearest the ball or None, the number read clearly off each track or None)."""
+    track with the ball at his feet or None, the number read clearly off each track or None, the
+    frame's shot — a cut shows even on a frame with no player tracked)."""
     ball = select_ball(to_detections(det[:, :4], det[:, 4], det[:, 5], 0.0), config["perception"]["ball"]["min_score"])
     ball_point = None if ball is None else (ball.bbox_ltwh[0] + ball.bbox_ltwh[2] / 2,
                                             ball.bbox_ltwh[1] + ball.bbox_ltwh[3])
     carrier = nearest_to_ball(tracks, ball_point)
     # "Clearly read" uses the same bar as a jersey vote (identity.jersey_min_prob).
     min_prob = config["perception"]["identity"]["jersey_min_prob"]
-    numbers = []
-    for probs in jersey:
-        label = -1 if np.isnan(probs[0]) else int(np.argmax(probs))
-        clear = label not in (-1, UNREADABLE) and probs[label] >= min_prob
-        numbers.append(label_to_number(label) if clear else None)
-    return tracks, None if carrier is None else carrier.key, numbers
-
-
-def observations(results: dict[int, list[dict]]) -> dict[str, dict]:
-    """What produced each observation id ("obs:<call id>#<i>"): its analyzer window and candidate."""
-    return {f"obs:{r['call_id']}#{i}": {"window": r["window"], "candidate": c}
-            for rows in results.values() for r in rows for i, c in enumerate(r.get("candidates", []))}
-
-
-def replay_events(config: dict[str, Any], match: Match, results: dict[int, list[dict]],
-                  decide=None) -> tuple[MatchMemory, list[dict]]:
-    """Offline run of the event loop (DESIGN.md §6.10) from cached analyzer answers.
-
-    `results` maps half -> the windows written by scripts/run_events.py (window, call_id,
-    latency, candidates with their voted players). Each window's answer takes effect at its
-    window end + the measured latency, so ops enter memory in knowledge-time order as they
-    would live; the missing-partner constraints are judged as time passes.
-
-    Every case the consistency check opens goes to the arbiter at once (event-level
-    conflicts escalate at k=1, DESIGN.md §6.4); its verdict takes effect at the case's
-    opening time + the arbiter's latency, however late (DESIGN.md §6.6). The arbiter is
-    `decide(mem, case, packet, t) -> Decision | None` — by default the API arbiter; None
-    leaves the case open (e.g. to evaluate the consistency check alone); scripts/run_arbiter.py
-    passes cached subagent verdicts. With loop.arbiter off, the newest belief of each case is
-    rejected instead. Returns memory and one record per case the arbiter decided.
-    """
-    import heapq
-    import itertools
-
-    from matchlive.arbiter.agent import Arbiter, build_packet
-    from matchlive.arbiter.verdict import apply_verdict, reject_newest
-    from matchlive.common.api import APIClient
-    from matchlive.events.analyzer import Candidate
-    from matchlive.events.consistency import ConsistencyChecker
-    from matchlive.runtime.evidence import EvidenceTools
-
-    mem = MatchMemory(match.prematch["players"], cascade=config["loop"]["cascade"])
-    checker = ConsistencyChecker(config)
-    tools = EvidenceTools(config, match)          # loads perception only when first asked
-    if decide is None:
-        client = APIClient(config["api"], config["paths"]["cache"])
-        arbiter = Arbiter(config["arbiter"], lambda parts: client.generate(parts, json_output=True))
-
-        def decide(mem, case, packet, t):
-            return arbiter.decide(packet, lambda tool, args: tools.call(mem, t, tool, args))
-    sources = observations(results)
-
-    # One timeline: analyzer answers arriving, and verdicts taking effect.
-    order = itertools.count()
-    # A re-check's row (a run_live run with loop.recheck) is no window: it is not replayed here.
-    queue = [((half, r["window"][1] + r["latency"]), next(order), "answer", (half, r))
-             for half, rows in results.items() for r in rows if "candidates" in r and "recheck" not in r]
-    queue.append(((3, 0.0), next(order), "whistle", None))       # after the final whistle
-    heapq.heapify(queue)
-    n_seen, records = 0, []
-    while queue:
-        t, _, kind, payload = heapq.heappop(queue)
-        if kind == "verdict":
-            record, decision, t_bound = payload
-            if mem.cases[record["case"]].status == "open":
-                record["void"] = apply_verdict(
-                    mem, t, record["case"], decision.verdict, decision.evidence_ids, t_bound,
-                    config["events"]["live_margin"],
-                    lambda key: len(tools.track_frames(key, t_bound)) > 0,
-                    lambda a, b: tools.cooccur(a, b, t_bound))
-            continue
-        checker.tick(mem, t)
-        if kind == "answer":
-            half, r = payload
-            for i, c in enumerate(r["candidates"]):
-                checker.propose(mem, t, half, tuple(r["window"]), Candidate.from_dict(c),
-                                f"obs:{r['call_id']}#{i}", c["players"])
-        # Case ids are handed out in order, so the new cases are the ones past n_seen.
-        new, n_seen = list(mem.cases.values())[n_seen:], len(mem.cases)
-        for case in new:
-            if not config["loop"]["arbiter"]:
-                reject_newest(mem, t, case.case_id)
-                continue
-            packet = build_packet(mem, case, t, sources, match.prematch, config["arbiter"]["context"])
-            decision = decide(mem, case, packet, t)
-            if decision is None:
-                continue
-            record = {"case": case.case_id, "constraint": case.constraint, "opened": t,
-                      "calls": decision.calls, "latency": decision.latency, "verdict": decision.verdict,
-                      "evidence": len(decision.evidence_ids), "void": decision.note or None}
-            records.append(record)
-            if decision.verdict is None:
-                continue
-            heapq.heappush(queue, ((t[0], t[1] + decision.latency), next(order), "verdict", (record, decision, t)))
-    return mem, records
+    numbers = [label_to_number(int(label)) if not np.isnan(label) and int(label) != UNREADABLE and prob >= min_prob
+               else None for label, prob in jersey]
+    return tracks, None if carrier is None else carrier.key, numbers, shot
 
 
 def off_roster_obs(half: int, key: tuple, player: str) -> str:
@@ -301,10 +169,9 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         the votes of the whole window (IdentityResolver.resolve, DESIGN.md §6.1 identity (f)),
         the event analyzer's request is built from them and sent through `client` (APIClient);
         its answer takes effect at the window end + the measured latency;
-      - with loop.recheck, an entry still pending on one live sighting once the next window's
-        answer has arrived is re-checked once: the analyzer, unchanged, on a window centred on
-        that sighting (DESIGN.md §6.4), unless that window is one of the fixed ones; the last
-        window of a half has no next one, so its lone sightings are not re-checked;
+      - with loop.recheck, an entry pending on one live sighting is re-checked once, as soon as
+        the frames of its re-check window are in: the analyzer, unchanged, on a window centred on
+        that sighting (DESIGN.md §6.4), unless that window is one of the fixed ones;
       - answers go through the consistency check; every event-level case goes to the arbiter
         at once, a perception case once it has `off_roster_k` sources; the verdict takes effect
         at the case's opening + the arbiter's summed latency, however late.
@@ -353,8 +220,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
     queue: list = []
     order = itertools.count()
     n_seen = 0                         # cases already handled (case ids are handed out in order)
-    # Re-checks (loop.recheck, DESIGN.md §6.4): a lone live sighting is re-checked once the
-    # window after its own has had its say.
+    # Re-checks (loop.recheck, DESIGN.md §6.4): a lone live sighting is re-checked as soon as the
+    # frames of its re-check window are in (at the latest when the next window has answered).
     after: dict[tuple, tuple] = {}     # (half, window) -> (half, the window after it)
     done: set[tuple] = set()           # (half, window) whose answer has arrived, or that failed
     rechecked: set[str] = set()        # entries re-checked already (once each)
@@ -445,9 +312,17 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                 for eid in due():
                     recheck(eid, when)
 
+    def recheck_window(half, second):
+        """The re-check's window: the fixed windows' length, centred on the sighting, within the half."""
+        length, grid = ev["window_seconds"], halves[half]["grid"]
+        w0 = max(0.0, min(second - length / 2, grid[-1] - length))
+        return w0, w0 + length
+
     def due():
-        """The entries to re-check now: pending on a single live sighting (not a replay), whose
-        next window's answer has arrived (or failed) without seeing it again."""
+        """The entries to re-check now: pending on a single live sighting (not a
+        replay), as soon as every frame of the re-check's window has been seen and given its
+        identities (the fixed windows over it have closed). A half's frames are let go when it
+        ends: what was not re-checked by then is not."""
         out = []
         for eid, e in mem.entries.items():
             if not isinstance(e, Event) or eid in rechecked:
@@ -460,7 +335,7 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
             if src["candidate"]["replay"] and loop["replay"]:
                 continue
             half = e.t_interval[0][0]
-            if after.get((half, tuple(src["window"]))) in done:
+            if half in halves and recheck_window(half, src["candidate"]["second"])[1] <= halves[half]["seen"]:
                 out.append(eid)
         return out
 
@@ -472,10 +347,10 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         registered. Returns the logged row; out of retries, the row has "error" instead."""
         h = halves[half]
         shown = [(s, h["images"][s]) for s in h["grid"] if window[0] <= s < window[1] and s in h["images"]]
-        request = build_request(half, window, shown, h["perceived"], prematch, ev["sample_fps"], ev["ask_confidence"])
+        request = build_request(half, window, shown, h["perceived"], prematch, ev["sample_fps"],
+                                config["perception"]["inject"], ev["ask_confidence"])
         # The player behind each track as last seen in the window — what the model was told.
-        players_of = {(half, *tr.key): tr.player_id
-                      for s, _ in shown for tr in h["perceived"].get(s, ((), None, ()))[0] if tr.player_id}
+        players_of = {(half, *tr.key): tr.player_id for s, _ in shown for tr in h["perceived"][s][0]}
         try:
             result = client.generate(request.parts, json_output=True)
         except NoAPIKey:
@@ -504,11 +379,9 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         e = mem.entries[eid]
         half = e.t_interval[0][0]
         obs_id = mem.justifications[eid][0][1].obs_id
-        second, h = sources[obs_id]["candidate"]["second"], halves[half]
-        length = ev["window_seconds"]
-        w0 = max(0.0, min(second - length / 2, h["grid"][-1] - length))
-        window = (w0, w0 + length)
-        if window in h["windows"]:
+        second = sources[obs_id]["candidate"]["second"]
+        window = recheck_window(half, second)
+        if window in halves[half]["windows"]:
             print(f"  re-check {eid} {e.type} at {half}H {second:.0f}s: skipped, a fixed window", flush=True)
             return
         # Logged whole: only a candidate that is a sighting of this entry will join it.
@@ -539,7 +412,8 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
         raw: dict[float, tuple] = {}              # sampled second -> (tracks, jersey, detections), kept for the windows that hold it
         reads_seen: set[str] = set()
         roster, confirmed, version = squad, {}, None
-        halves[half] = {"images": images, "perceived": perceived, "grid": grid, "windows": set(windows)}
+        # "seen": the end of the last window closed, up to which the frames have their identities.
+        halves[half] = {"images": images, "perceived": perceived, "grid": grid, "windows": set(windows), "seen": 0.0}
         after.update({(half, a): (half, b) for a, b in zip(windows, windows[1:])})
 
         def fire(window):
@@ -560,9 +434,13 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
             # Identity of the window's frames from the votes of the whole window (DESIGN.md §6.1
             # identity (f)); the analyzer is only shown them now. The next window shares its first
             # `window_overlap` s with this one and resolves them again with more votes.
-            for s, (tracks, jersey, det) in raw.items():
-                if window[0] <= s < window[1]:
-                    perceived[s] = frame_view(config, resolver.resolve(tracks, roster, confirmed), jersey, det)
+            # Every sampled frame of the window, a close-up with no player tracked included: the
+            # commentary and the QA are shown them all.
+            for s in [s for s in images if window[0] <= s < window[1]]:
+                tracks, jersey, det = raw.get(s, ([], np.zeros((0, 2)), np.zeros((0, 6))))
+                perceived[s] = frame_view(config, resolver.resolve(tracks, roster, confirmed), jersey, det,
+                                          int(arrays["shot_id"][int(round(s * fps))]))
+            halves[half]["seen"] = window[1]
             r = analyze(half, window)
             if "error" in r:
                 print(f"{half}H {window[0]:.0f}-{window[1]:.0f}s failed: {r['error']}", flush=True)
@@ -572,9 +450,9 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                   f"{' cached' if r['cached'] else ''}", flush=True)
             heapq.heappush(queue, ((half, window[1] + r["latency"]), next(order), "answer", (half, r)))
             if loop["recheck"] and loop["consistency"]:
-                # A re-check (DESIGN.md §6.4) is sent once a sighting's window and the one after it
-                # have answered, on frames from half a window before the sighting's window: keep
-                # them back to the earliest window still waiting for either answer.
+                # A re-check (DESIGN.md §6.4) is sent by the time the window after the sighting's has
+                # answered, on frames from half a window before the sighting's window: keep them
+                # back to the earliest window still waiting for either answer.
                 waiting = next(a for a in windows if not {(half, a), after.get((half, a))} <= done)
                 horizon = waiting[0] - ev["window_seconds"] / 2
             else:
@@ -596,7 +474,9 @@ def run_live(config: dict[str, Any], match: Match, out_dir: Path, client, corrup
                 # Memory changed: the players on the pitch now, and the confirmed identities of
                 # this half's tracks (DESIGN.md §6.1 identity (a), (c)).
                 version = len(mem.ops)
-                view = mem.at((half, second))
+                # Every change known by now, whatever its interval (a substitution counts 45 s after
+                # its sighting in event time, but the players are on and off from the sighting).
+                view = mem.at((3, 0.0), known_by=(half, second))
                 on = set(view.on_field["home"] + view.on_field["away"])
                 roster = roster_index([p for p in prematch["players"] if p["hash"] in on])
                 confirmed = {key[1:]: pid for key, pid in mem.track_players().items() if key[0] == half}
@@ -642,7 +522,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     [a, b) is asked for at feed time a + D - `budget`: the feed is then past b, so every sampled
     frame of the stretch is there (labelled with who each tracked player is as far as known then;
     runtime.qa_tools), and memory as known then has D - budget s of hindsight on its start. The
-    policy gives the material (what must and may be said, from memory), the generator writes the
+    policy gives the material (what must be said, from memory), the generator writes the
     script (one model call through `client`), each phrase at a frame, and every phrase is voiced
     (one text-to-speech call each, all at once). The stretch is ready at the asking time + both
     latencies, so it can go on air from ready - D on. A stretch is asked for every `segment` s and
@@ -663,7 +543,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     commentary.api), which then only voices them.
 
     Returns one record per phrase on air: its kind (the material item it says — correction,
-    confirmation, opener, news, recap, background — or play), entry, text and tone (its energy), the
+    confirmation, opener, news — or background when it only tells a pre-match fact, else play;
+    and the fact's id), entry, text and tone (its energy), the
     entry's status and the players it may name, the stretch it belongs to, the match times it was
     asked for (t_decide), ready (t_ready), of its event (t_event, or its own frame) and of its frame
     (at), when it is on air ("show": half, start, end in video time), the material's facts, who is
@@ -675,7 +556,7 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     from concurrent.futures import ThreadPoolExecutor
 
     from matchlive.app.commentary import Commentator, CommentaryPolicy, speaking_time
-    from matchlive.app.tts import Voice
+    from matchlive.app.tts import NoVoice, Voice
     from matchlive.common.api import NoAPIKey
     from matchlive.events.analyzer import clock
     from matchlive.runtime.qa_tools import QATools
@@ -694,7 +575,8 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
     pictures = QATools(view_config, match, mem, perceived, sources)
     policy = CommentaryPolicy(cfg, match.prematch, sources)
     writer = writer or client
-    commentator = Commentator(cfg, lambda parts: writer.generate(parts, json_output=True, reasoning=cfg["reasoning"]))
+    commentator = Commentator(cfg, lambda parts: writer.generate(parts, json_output=True, reasoning=cfg["reasoning"]),
+                              match.prematch["players"], policy.knowledge, policy.lineups)
     voice = Voice(cfg["voice"], client.speech)
 
     def speak(phrase):
@@ -704,16 +586,15 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
             return str(spoken.path), spoken.duration, spoken.latency
         except NoAPIKey:
             raise
+        except NoVoice:
+            return None, speaking_time(phrase.text, cfg["words_per_second"]), 0.0
         except Exception as e:  # noqa: BLE001 — out of API retries: a subtitle without a voice
-            if "dry run" not in str(e):
-                print(f"no voice for {phrase.text!r}: {e}", flush=True)
+            print(f"no voice for {phrase.text!r}: {e}", flush=True)
             return None, speaking_time(phrase.text, cfg["words_per_second"]), 0.0
 
     def key(item):
         """What an item is about, to tell two offers of the same thing apart."""
-        if item.entry is not None:
-            return ("entry", item.entry)
-        return ("angle", item.angle[0]) if item.angle is not None else (item.kind,)
+        return ("entry", item.entry) if item.entry is not None else (item.kind,)
 
     lines: list[dict] = []
     with ThreadPoolExecutor(8) as pool:
@@ -727,15 +608,18 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
             # ones carry on from, the items the policy marks as said) is known once it is ready;
             # until then the items it was given are offered to no other stretch.
             under_way: list[dict] = []
-            history: list[str] = []
+            history: list[tuple[float, str]] = []  # (video second it began, text)
 
             def settle(now):
                 """Take in every stretch ready by feed time `now`."""
                 for done in [s for s in under_way if s["ready"] <= now]:
                     under_way.remove(done)
                     history.extend(done["texts"])
+                    history.sort()             # stretches can be ready out of order
                     for item, (texts, start) in done["said"]:
                         policy.said(item, " ".join(texts), (half, start))
+                    for fact, start in done["told"]:
+                        policy.told(fact, (half, start))
 
             a = first
             while a < last:
@@ -749,13 +633,15 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                     continue
                 view = mem.at((half, t))
                 taken = {key(item) for s in under_way for item in s["items"]}
-                # Pre-match background over the pictures, unless a stretch under way was given some
-                # (it may be on air, and one comes every `background_every` s at most).
-                pictured = [] if any(item.kind == "background" for s in under_way for item in s["items"]) \
-                    else policy.on_screen(frames.text, (half, a))
-                items = [item for item in policy.material(view, (half, a, b)) + pictured if key(item) not in taken]
+                held = {item.entry for s in under_way for item in s["items"] if item.entry is not None}
+                items = [item for item in policy.material(view, (half, a, b), held) if key(item) not in taken]
                 try:
-                    script, latency, call_id = commentator.script(items, frames, policy.where(view, (half, a, b)), history)
+                    before = [(s["span"][0], s["span"][1], s["pictures"], s["items"])
+                              for s in sorted(under_way, key=lambda s: s["span"])]
+                    # Facts already told, and those a stretch under way tells: none goes twice.
+                    told = {**{f: (half, start) for s in under_way for f, start in s["told"]}, **policy.facts_told}
+                    script, latency, call_id = commentator.script(half, items, frames, policy.where(view, (half, a, b)),
+                                                                  history, before, told)
                 except NoAPIKey:
                     raise
                 except Exception as e:  # noqa: BLE001 — out of API retries: this stretch is lost
@@ -766,30 +652,34 @@ def run_commentary(config: dict[str, Any], match: Match, run_dir: Path, client,
                 tts_latency = max((s[2] for s in spoken), default=0.0)
                 ready = t + latency + tts_latency
                 said: dict[int, tuple[list[str], float]] = {}  # item -> (its phrases on air, when the first started)
-                texts = []
+                texts, told = [], []
                 for p, (audio, duration, _) in zip(script, spoken):
                     start = max(p.at, ends, ready - delay)
-                    must = p.item is not None and p.item.must
-                    if start - p.at > cfg["late_event" if must else "late"]:
+                    if start - p.at > cfg["late_event" if p.item is not None else "late"]:
                         print(f"{half}H {clock(p.at)} [{p.item.kind if p.item else 'play'}] too late by "
                               f"{start - p.at:.1f} s: dropped {p.text!r}", flush=True)
                         continue
                     item = p.item
                     if item is not None:
                         said.setdefault(id(item), ([], start))[0].append(p.text)
-                    texts.append(p.text)
-                    lines.append({"kind": item.kind if item else "play", "entry": item.entry if item else None,
+                    texts.append((start, p.text))
+                    if p.fact:
+                        told.append((p.fact, start))
+                    lines.append({"kind": item.kind if item else "background" if p.fact else "play",
+                                  "fact": p.fact, "entry": item.entry if item else None,
                                   "status": item.status if item else None, "named": item.named if item else {},
                                   "text": p.text, "tone": p.energy, "segment": (half, a, b),
                                   "t_decide": (half, t), "t_ready": (half, ready),
                                   "t_event": item.t_event if item and item.t_event else (half, p.at),
                                   "at": (half, p.at), "show": (half, start, start + duration),
-                                  "facts": item.facts if item else [], "pictures": frames.text,
+                                  "facts": item.facts if item else [policy.knowledge[p.fact]] if p.fact else [],
+                                  "pictures": frames.text,
                                   "call_id": call_id, "latency": latency, "audio": audio, "duration": duration,
                                   "tts_latency": tts_latency})
                     print(f"{half}H {clock(start)} [{lines[-1]['kind']}/{p.energy}] {p.text}", flush=True)
                     ends = start + duration + cfg["gap"]
-                under_way.append({"ready": ready, "items": items, "texts": texts,
+                under_way.append({"ready": ready, "items": items, "texts": texts, "told": told, "span": (a, b),
+                                  "pictures": frames.text,
                                   "said": [(item, said[id(item)]) for item in items if id(item) in said]})
                 a = b
             settle(float("inf"))

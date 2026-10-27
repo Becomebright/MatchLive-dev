@@ -28,6 +28,7 @@ import numpy as np
 from matchlive.common.api import APIClient
 from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
+from matchlive.app.tts import NoVoice
 from matchlive.runtime.runner import run_commentary
 
 
@@ -37,13 +38,14 @@ class DryRun:
     phrase's speaking time is estimated."""
 
     def generate(self, parts, json_output=False, reasoning=None):
-        must = re.findall(r"^- (M\d+), at frame (\d+) \(\w+\): (.*?) How:", parts[0], flags=re.M)
-        script = [{"frame": int(k), "say": " ".join(facts.split()[:12]), "energy": "lively", "material": m}
+        # A confirmation is "at a pause": said on the first frame.
+        must = re.findall(r"^- (M\d+), (?:at frame (\d+)|at a pause in these seconds) \(\w+\): (.*?) How:", parts[0], flags=re.M)
+        script = [{"frame": int(k or 1), "say": " ".join(facts.split()[:12]), "energy": "lively", "material": m}
                   for m, k, facts in must]
         return SimpleNamespace(text=json.dumps({"script": script}), latency=4.0, call_id="dry")
 
     def speech(self, *args):
-        raise RuntimeError("dry run: no voice")
+        raise NoVoice
 
 
 def srt(lines: list[dict], half: int) -> str:
@@ -76,9 +78,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     client = DryRun() if args.dry else APIClient(config["api"], config["paths"]["cache"])
-    # The scripts through a model of their own when commentary.api says so (its settings over `api`).
-    own = config["commentary"].get("api")
-    writer = APIClient({**config["api"], **own}, config["paths"]["cache"]) if own and not args.dry else None
+    # The scripts through a model of their own (commentary.api: its settings over `api`).
+    own = config["commentary"]["api"]
+    writer = APIClient({**config["api"], **own}, config["paths"]["cache"]) if not args.dry else None
     only = (int(args.only[0]), args.only[1], args.only[2]) if args.only else None
     lines = run_commentary(config, match, run_dir, client, only, writer)
     (out_dir / "run.json").write_text(json.dumps({"run": args.run, "dry": args.dry, "set": args.set, "only": only}, indent=1))

@@ -46,9 +46,10 @@ class Event:
     # "home" | "away" | None. For a goal it is the side credited with it, own goals
     # included, so the score is a plain count per team.
     team: str | None
-    # When it happened, as far as the proposer can tell: the analysed segment for a live
-    # candidate, [replay start - W, replay start] for a replay candidate. Inferences time
-    # an event by the interval's end, the moment it has certainly happened.
+    # When it happened, as far as the proposer can tell: the sighting ± events.live_margin for a
+    # live candidate (or a verdict's event), [window start - replay_lookback, window end] for a
+    # replay candidate. Inferences time an event by the interval's end, the moment it has
+    # certainly happened.
     t_interval: tuple[Time, Time]
     participants: tuple[Participant, ...] = ()
 

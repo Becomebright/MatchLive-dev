@@ -2,19 +2,23 @@
 
 Every candidate goes through two steps:
   1. Match it to existing entries — same type, same half, compatible team, overlapping event
-     time. One match: the candidate becomes another justification of that entry. None: a new
-     entry. Several: a new entry plus a case for the arbiter to say which one it was.
-  2. Check the constraints. Mutually exclusive beliefs (two goals by one team with no time
-     for a kick-off, the same player carded twice within a minute, an invalid substitution,
-     a player back on after leaving, two sources naming different players) open a case with
-     those beliefs as members. A missing partner (a foul with no restart after it, a free
+     time; never an entry from the same answer (two events the model told apart), nor, for a
+     substitution, one naming other players (another change). One match: the candidate becomes
+     another justification of that entry. None: a new entry. Several: a new entry plus a case
+     for the arbiter to say which one it was.
+  2. Check the constraints. A new entry that excludes standing ones (two goals by one team with
+     no time for a kick-off, the same player carded twice within a minute) opens a case with the
+     new entry as its member and the standing ones as context; an invalid substitution, a player
+     back on after leaving, or two sources naming different players open a case with those
+     beliefs as members. A missing partner (a foul with no restart after it, a free
      kick with no infringement before it) is only judged once enough match time has passed
      for the partner to have been analysed — see `tick()`.
 Perception proposes beliefs too (loop.state_to_perception): a number read on the pitch that
 belongs to a player memory has off it — see `off_roster_read()`.
 
 A foul and the free kick that restarts play after it confirm each other: each one's first
-observation is added as a justification of the other, since two independent sources agree.
+observation is added as a justification of the other, since two independent sources agree —
+holding only while the entry's own first observation does.
 
 A justification is sufficient (DESIGN.md §6.4) when a second, independent source agrees with
 the entry, or when a re-check of a lone live sighting sees it again (`recheck()`, loop.recheck:
@@ -87,7 +91,14 @@ class ConsistencyChecker:
             return mem.add_entry(t_known, event, Justification(obs_id, "observation", True))
 
         events = live_events(mem)
-        matches = matching(events, event)
+        track_players = mem.track_players()
+        call = obs_id.rsplit("#", 1)[0]
+        # Two candidates of one answer are two events the model told apart, and a substitution
+        # naming other players is another change (several are often made at once): neither is a
+        # sighting of the other.
+        matches = [m for m in matching(events, event)
+                   if not any(j.obs_id.rsplit("#", 1)[0] == call for _, j in mem.justifications[m])
+                   and not (event.type == "substitution" and _disagree(mem.entries[m], event, track_players))]
         if self.gate is not None:
             # The confidence-gating baseline (MemTX-like): a confident sighting is taken as true
             # at once — joined to the entry it matches, or a new confirmed entry; no constraints.
@@ -102,7 +113,10 @@ class ConsistencyChecker:
         # A single sighting never suffices on its own (DESIGN.md §6.4).
         eid = mem.add_entry(t_known, event, Justification(obs_id, "observation", False))
         if len(matches) > 1:
+            # Which entry it is a sighting of is the arbiter's call; the constraints on a new entry
+            # would only find the same entries again (a second case on the same members).
             mem.open_case(t_known, [*matches, eid], "ambiguous_match", [obs_id])
+            return eid
         self._check_new(mem, t_known, eid, events)
         return eid
 
@@ -136,11 +150,7 @@ class ConsistencyChecker:
     def _join(self, mem: MatchMemory, t_known: Time, eid: str, event: Event, obs_id: str, kind: str,
               of: str | None) -> None:
         """A sighting of entry `eid` becomes one more justification of it (step 1)."""
-        # Two claims about one event disagree when they name different identified players
-        # in the same role.
-        track_players = mem.track_players()
-        old, new = _by_role(mem.entries[eid], track_players), _by_role(event, track_players)
-        clash = any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
+        clash = _disagree(mem.entries[eid], event, mem.track_players())
         # Claims that agree pool their participants: who this sighting saw joins the entry
         # (DESIGN.md §6.4 step 1), so a player only the second window identified is not lost.
         mem.add_justification(t_known, eid, Justification(obs_id, kind, not clash,
@@ -155,7 +165,8 @@ class ConsistencyChecker:
             return
         eid = mem.add_entry(t_known, Identity(key, player),
                             Justification("vote:" + "/".join(map(str, key)) + ":" + player, "observation", True))
-        if claims and self.gate is None:     # the gating baseline has no cases: the later claim wins
+        # The gating baseline and loop.consistency off have no cases: the later claim wins.
+        if claims and self.enabled and self.gate is None:
             mem.open_case(t_known, [c for c, _ in claims] + [eid], "claims_disagree")
 
     # ---- constraints on a new entry ----
@@ -174,7 +185,9 @@ class ConsistencyChecker:
                      and abs(o.t_interval[1][1] - t) < self.cfg[gap]
                      and (not same_player or _by_role(o, track_players).get("player") == players.get("player"))]
             if clash:
-                mem.open_case(t_known, [*clash, eid], constraint)
+                # Only the new entry is in doubt: the standing ones go with the case as context (the
+                # arbiter may still reject their observations), and stay as they are meanwhile.
+                mem.open_case(t_known, [eid], constraint, clash)
 
         if e.type == "substitution" or (e.type not in ("yellow_card", "red_card") and any(players.values())):
             # The lineups as known now, just before this event.
@@ -195,9 +208,11 @@ class ConsistencyChecker:
         partner = self._partner(events, e)
         if partner is not None:
             for a, b in ((eid, partner), (partner, eid)):
-                first = mem.justifications[b][0][1].obs_id
+                first, own = mem.justifications[b][0][1].obs_id, mem.justifications[a][0][1].obs_id
                 if all(j.obs_id != first for _, j in mem.justifications[a]):
-                    mem.add_justification(t_known, a, Justification(first, "observation", True))
+                    # It confirms this entry only while the entry's own sighting holds: rejecting
+                    # that leaves no entry standing on a sighting of another event.
+                    mem.add_justification(t_known, a, Justification(first, "observation", True, (), own))
             # A partner that turns up after its absence was already judged is new evidence
             # for that case; closing it is the arbiter's call.
             for c in (mem.cases[cid] for x in (eid, partner) for cid in mem.open_cases(x)):
@@ -269,6 +284,12 @@ def live_events(mem: MatchMemory) -> list[tuple[str, Event]]:
 
 def _by_role(event: Event, track_players: dict[tuple, str]) -> dict[str, str | None]:
     return dict(zip((p.role for p in event.participants), resolve_players(event, track_players)))
+
+
+def _disagree(a: Event, b: Event, track_players: dict[tuple, str]) -> bool:
+    """Two claims about one event disagree when they name different identified players in the same role."""
+    old, new = _by_role(a, track_players), _by_role(b, track_players)
+    return any(old[r] and new[r] and old[r] != new[r] for r in old.keys() & new.keys())
 
 
 def _overlaps(a: tuple[Time, Time], b: tuple[Time, Time]) -> bool:

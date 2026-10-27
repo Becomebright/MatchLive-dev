@@ -90,8 +90,9 @@ class View:
                         if out in self.on_field[side]:
                             self.on_field[side].remove(out)
                         if sub in self.bench[side]:
+                            # Only from the bench: the same change counted twice does not field him twice.
                             self.bench[side].remove(sub)
-                    self.on_field[roster[sub]["team_side"]].append(sub)
+                            self.on_field[side].append(sub)
 
     def _send_off(self, player_id: str) -> None:
         # A player sent off leaves the pitch for good; a sent-off substitute can no longer come on.

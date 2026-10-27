@@ -31,21 +31,17 @@ class EvidenceTools:
         self.match = match
         self.fps: dict[int, float] = {}
         self.rows: dict[int, np.ndarray] = {}         # half -> track rows (frame, shot, role, track, l, t, w, h)
-        self.jersey: dict[int, np.ndarray] = {}
-        self.paths: dict[int, Any] = {}
+        self.jersey: dict[int, np.ndarray] = {}       # half -> jersey reads (top label, probability) of those rows
         self._tracks: dict[tuple, np.ndarray] = {}    # (half, shot, track) -> indices of its rows, in frame order
 
     def _load(self, half: int) -> None:
-        # A half's cache is loaded on first use: the command-line tool the arbiter subagent
-        # calls starts afresh each time and usually needs one half.
+        # A half's cache is loaded on first use.
         if half in self.rows:
             return
-        # Only the track rows are read here (the jersey probabilities are 6x larger and only
-        # jersey_reads needs them, so they load on first use there).
-        self.paths[half] = cache_path(self.config, self.match.video_path(half), self.match.name, half, 0, None)
-        with np.load(self.paths[half]) as data:
+        with np.load(cache_path(self.config, self.match.video_path(half), self.match.name, half, 0, None)) as data:
             self.fps[half] = json.loads(str(data["meta"]))["fps"]
             self.rows[half] = data["track"]
+            self.jersey[half] = data["jersey"]
         keys = self.rows[half][:, 1:4:2].astype(np.int64)            # (shot, track)
         order = np.lexsort((self.rows[half][:, 0], keys[:, 1], keys[:, 0]))
         cuts = np.flatnonzero(np.any(np.diff(keys[order], axis=0) != 0, axis=1)) + 1
@@ -161,22 +157,17 @@ class EvidenceTools:
         if idx is None:
             return Evidence(f"error: no track {track_name(key)}")
         half = key[0]
-        if half not in self.jersey:
-            with np.load(self.paths[half]) as data:
-                self.jersey[half] = data["jersey"]
         idx = idx[self._before(half, self.rows[half][idx, 0], t_bound)]
-        probs = self.jersey[half][idx].astype(np.float32)
-        probs = probs[~np.isnan(probs[:, 0])]
-        labels = probs.argmax(1) if len(probs) else np.zeros(0, int)
-        clear = [label_to_number(int(l)) for l, p in zip(labels, probs)
-                 if l != UNREADABLE and p[l] >= self.min_prob]
+        readable = self.jersey[half][idx]
+        readable = readable[~np.isnan(readable[:, 0])]
+        clear = [label_to_number(int(label)) for label, prob in readable if int(label) != UNREADABLE and prob >= self.min_prob]
         counts = {n: clear.count(n) for n in sorted(set(clear), key=clear.count, reverse=True)}
         reads = ", ".join(f"#{n} ×{c}" for n, c in counts.items()) or "none"
-        return Evidence(f"track {track_name(key)}: seen in {len(idx)} frames, {len(probs)} readable crops; "
+        return Evidence(f"track {track_name(key)}: seen in {len(idx)} frames, {len(readable)} readable crops; "
                         f"numbers read clearly (probability ≥ {self.min_prob}): {reads}")
 
     def _list_events(self, mem: MatchMemory, t_bound: Time, half: int, start: float, end: float) -> Evidence:
-        view = mem.at(t_bound, known_by=t_bound)
+        view = mem.at((3, 0.0), known_by=t_bound)          # every entry known by then, whatever its interval
         lines = [f"- {r.entry_id}: {r.event.type}, team {r.event.team}, half {r.event.t_interval[1][0]} "
                  f"{clock(r.event.t_interval[0][1])}–{clock(r.event.t_interval[1][1])} [{r.status}]"
                  for r in view.events(since=(half, start), until=(half, end))]

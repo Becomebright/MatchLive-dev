@@ -25,7 +25,6 @@ from matchlive.events.analyzer import clock, labelled_frames
 from matchlive.events.windows import fixed_windows
 from matchlive.memory.store import MatchMemory
 from matchlive.memory.types import Event, Time
-from matchlive.runtime.evidence import EvidenceTools
 
 
 class QATools:
@@ -39,9 +38,6 @@ class QATools:
         self.prematch = match.prematch
         self.players = {p["hash"]: p for p in self.prematch["players"]}
         self.replay = config["loop"]["replay"]
-        self.video = EvidenceTools(config, match)
-        for half in (1, 2):         # loaded up front: questions are answered from several threads
-            self.video._load(half)
         # How long the first half ran, to reach back across half-time ("the last 10 minutes").
         self.first_half = max(perceived[1])
         # Each track's identity over time: (half, shot, track) -> ([time it was known], [(team, player)]),
@@ -49,11 +45,12 @@ class QATools:
         # frame's identity comes from the votes of its whole window (DESIGN.md §6.1 identity (f)),
         # so it is known when the last window holding the frame ends, not at the frame.
         ev = config["events"]
+        self.windows = {half: fixed_windows(max(frames) + 1 / ev["sample_fps"], ev["window_seconds"], ev["window_overlap"])
+                        for half, frames in perceived.items()}
         self.voted: dict[tuple, tuple[list, list]] = {}
         for half, frames in perceived.items():
-            windows = fixed_windows(max(frames) + 1 / ev["sample_fps"], ev["window_seconds"], ev["window_overlap"])
             for s in sorted(frames):
-                known = next(end for start, end in reversed(windows) if start <= s)
+                known = self._known(half, s)
                 for tr in frames[s][0]:
                     times, ids = self.voted.setdefault((half, *tr.key), ([], []))
                     times.append(known)
@@ -134,10 +131,11 @@ class QATools:
 
     def _when(self, past: MatchMemory, eid: str, e: Event) -> tuple[int, float, bool]:
         """(half, second, exact): the median second at which the analyzer saw it live, or the
-        middle of its interval (verdicts add events there); a replay sighting only bounds it."""
-        seen = sorted(self.sources[j.obs_id]["candidate"]["second"] for _, j in past.justifications[eid]
-                      if j.obs_id in self.sources and past.holds(j)
-                      and not (self.replay and self.sources[j.obs_id]["candidate"]["replay"]))
+        middle of its interval (verdicts add events there); a replay sighting only bounds it.
+        Only sightings of this type count: a foul's paired free kick stands behind it too."""
+        seen = sorted(c["second"] for _, j in past.justifications[eid]
+                      if j.obs_id in self.sources and past.holds(j) and (c := self.sources[j.obs_id]["candidate"])["type"] == e.type
+                      and not (self.replay and c["replay"]))
         (half, lo), (_, hi) = e.t_interval
         if seen:
             return half, seen[len(seen) // 2], True
@@ -283,9 +281,9 @@ class QATools:
         frames, known = self._read(half, seconds), {}
         track_players = self.mem.at(now).mem.track_players()
         for s, _ in frames:
-            tracks, carrier, numbers = perceived[s]
-            known[s] = ([self._as_known(half, tr, now, track_players) for tr in tracks], carrier, numbers)
-        block, parts, _ = labelled_frames(frames, known, self.prematch)
+            tracks, carrier, numbers, shot = perceived[s]
+            known[s] = ([self._as_known(half, s, tr, now, track_players) for tr in tracks], carrier, numbers, shot)
+        block, parts, _ = labelled_frames(frames, known, self.prematch, False)
         return Evidence(f"{len(frames)} frames of half {half}, {clock(frames[0][0])}-{clock(frames[-1][0])}; "
                         f"player IDs are local to these frames.\n{block}",
                         [p for p in parts if isinstance(p, bytes)], seconds=[s for s, _ in frames])
@@ -293,29 +291,38 @@ class QATools:
     def _read(self, half: int, seconds: list[float]) -> list[tuple[float, np.ndarray]]:
         """The video frames at `seconds` of `half` (duplicates once; unreadable ones skipped)."""
         cap = cv2.VideoCapture(str(self.match.video_path(half)))
+        fps = cap.get(cv2.CAP_PROP_FPS)
         frames = []
         for s in dict.fromkeys(seconds):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(s * self.video.fps[half])))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(s * fps)))
             ok, image = cap.read()
             if ok:
                 frames.append((s, image))
         cap.release()
         return frames
 
-    def _as_known(self, half: int, tr: Track, now: Time, track_players: Mapping[tuple, str]) -> Track:
-        """A track as known by `now`: memory's confirmed identity, else its latest identity known by
-        now (a player seen in an old frame may have been identified later, but before now). A
+    def _known(self, half: int, s: float) -> float:
+        """When the identity of the frame at `s` is known: the end of the last window holding it."""
+        return next(end for start, end in reversed(self.windows[half]) if start <= s)
+
+    def _as_known(self, half: int, s: float, tr: Track, now: Time, track_players: Mapping[tuple, str]) -> Track:
+        """A track of the frame at `s` as known by `now`: memory's confirmed identity (its side
+        that player's), else its latest identity known by now (a player seen in an old frame may
+        have been identified later, but before now), else the frame's own once that is known. A
         track whose first window has not ended yet has none: the frame's own identity comes
         from that window's votes."""
         key = (half, *tr.key)
         if key in track_players:
-            return replace(tr, player_id=track_players[key])
+            player = track_players[key]
+            return replace(tr, team=self.players[player]["team_side"], player_id=player)
         seconds, ids = self.voted.get(key, ([], []))
         i = bisect_right(seconds, now[1]) - 1 if half == now[0] else len(seconds) - 1
         if i < 0:
             return replace(tr, team=None, player_id=None)
         team, player = ids[i]
-        return replace(tr, team=team or tr.team, player_id=player or tr.player_id)
+        if (half, self._known(half, s)) <= now:
+            team, player = team or tr.team, player or tr.player_id
+        return replace(tr, team=team, player_id=player)
 
     # ---- names ----
 

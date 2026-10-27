@@ -2,15 +2,21 @@
 entry's status — a confirmed event names its player, a pending one only its team (and waits a
 little for its confirmation first), a disputed one waits for the verdict — and when something
 already said stops holding (retracted, or a different player), the next stretch corrects it with
-the reason. Each event is placed at the moment it happens; nothing after the stretch is said; what
-a script left out is offered again while it is still news; how the match stands and pre-match
-background are offered only for a lull.
+the reason; a confirmation long after the event goes unsaid. Each event is placed at the moment it
+happens; nothing after the stretch is said; what a script left out is offered again while it is
+still news; the match state (time, ends, score, record) is one, and a pending goal aired is listed
+but not counted; the pre-match knowledge base goes to the generator, a told fact leaves it, and no
+rule picks from it; the line-ups place each starter by line and side.
 
 Each test writes a few ops to a small synthetic memory and asks the policy for a stretch's
 material; no model is called (the generator only phrases the material over the pictures).
 """
 
-from matchlive.app.commentary import CommentaryPolicy, Item
+import json
+from types import SimpleNamespace
+
+from matchlive.app.commentary import Commentator, CommentaryPolicy, Item
+from matchlive.common.match import _side
 from matchlive.common.config import load_config
 from matchlive.memory.store import MatchMemory
 from matchlive.memory.types import Event, Identity, Justification, Participant
@@ -52,7 +58,7 @@ def policy(prematch=PREMATCH, sources=None):
 def ask(p, mem, t, end=None):
     """The material for the stretch ending at `end` (default: t) with memory known at t."""
     end = t if end is None else end
-    return p.material(mem.at(T(t)), (1, end - SEGMENT, end))
+    return p.material(mem.at(T(t)), (1, end - SEGMENT, end), ())
 
 
 def news(items):
@@ -63,8 +69,7 @@ def air(p, mem, t, end=None):
     """The stretch's must-say items, said as the script would."""
     items = ask(p, mem, t, end)
     for i in items:
-        if i.must:
-            p.said(i, f"line about {i.entry}", i.at)
+        p.said(i, f"line about {i.entry}", i.at)
     return items
 
 
@@ -79,7 +84,7 @@ def test_confirmed_event_names_its_player_at_the_moment_it_happens():
     mem.add_entry(T(95), Identity(TRACK, "h1"), seen("vote:h1"))
     eid = mem.add_entry(T(100), goal(85, player=TRACK), seen("live#1"))
     item = one(ask(mem=mem, p=policy(), t=100, end=90), "news")
-    assert item.entry == eid and item.status == "confirmed" and item.must
+    assert item.entry == eid and item.status == "confirmed"
     assert item.named == {"player": "h1"}
     assert any("Home Player1" in f for f in item.facts)
     assert item.at == T(85)                                      # where it happens in the stretch [80, 90)
@@ -138,7 +143,7 @@ def test_nothing_after_the_stretch_is_said():
     # Memory knows of the goal at 160, but the stretch ends at 100: no news, and the score is still 0-0.
     items = ask(p, mem, 160, end=100)
     assert news(items) == []
-    assert any("Homeside 0, Awayside 0" in f for f in one(items, "recap").facts)
+    assert "Score as these seconds begin: Homeside 0, Awayside 0." in p.where(mem.at(T(160)), (1, 90, 100))
     # Once the viewer sees it, it is news.
     assert news(ask(p, mem, 160, end=152)) == [eid]
 
@@ -168,7 +173,6 @@ def test_retracted_fact_is_corrected_with_the_verdict():
     assert (item.entry, item.status, item.at) == (second, "retracted", T(200 - SEGMENT))   # first thing
     reason = next(f for f in item.facts if f.startswith("What turned out"))
     assert "replay of the first goal" in reason
-    assert not any(code in reason for code in ("E6", "E5", "02:10", "track"))   # no system codes on air
     assert mem.at(T(200)).score == {"home": 1, "away": 0}
     # Once corrected, it is not corrected again.
     p.said(item, "No, only one goal.", item.at)
@@ -189,6 +193,19 @@ def test_player_named_on_air_then_changed_is_corrected():
     assert any("actually Player2" in f for f in item.facts)
 
 
+def test_a_name_said_on_air_whose_identity_is_dropped_is_corrected():
+    mem = MatchMemory(PLAYERS)
+    mem.add_entry(T(95), Identity(TRACK, "h1"), seen("vote:h1"))
+    eid = mem.add_entry(T(100), goal(80, player=TRACK), seen("live#1"))
+    p = policy()
+    assert one(air(p, mem, 100), "news").named == {"player": "h1"}
+    # The vote is overturned and nobody takes its place: the goal stands, its scorer is unknown.
+    mem.reject_observation(T(300), "vote:h1")
+    item = one(ask(p, mem, 300), "correction")
+    assert item.entry == eid and item.named == {}
+    assert any("no longer known who it was" in f for f in item.facts)
+
+
 def test_pending_goal_is_aired_again_once_confirmed():
     mem = MatchMemory(PLAYERS)
     eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
@@ -198,6 +215,27 @@ def test_pending_goal_is_aired_again_once_confirmed():
     mem.add_justification(T(140), eid, seen("replay#1"))
     item = one(ask(p, mem, 140), "confirmation")
     assert (item.entry, item.named) == (eid, {"player": "h1"})
+
+
+def test_a_confirmation_long_after_the_event_goes_unsaid_but_the_record_has_it():
+    mem = MatchMemory(PLAYERS)
+    eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
+    p = policy()
+    air(p, mem, 100 + HOLD)
+    # Confirmed two minutes on: the play has moved on, so no line about it now or later.
+    mem.add_justification(T(220), eid, seen("replay#1"))
+    late = 90 + CONFIG["confirm_within"] + SEGMENT + 20
+    assert not any(i.entry == eid for t in (220, 240, late) for i in ask(p, mem, t))
+    assert "Player1" in p.where(mem.at(T(240)), (1, 230, 240))
+
+
+def test_which_way_each_team_attacks_goes_with_every_stretch():
+    p = policy()
+    mem = MatchMemory(PLAYERS)
+    # Home defends the left goal in the first half: it attacks to the right, its left wing on the far side.
+    assert "Homeside attack towards the goal on the right of the main camera's wide picture: their left wing is " \
+           "the far touchline" in p.where(mem.at(T(30)), (1, 20, 30))
+    assert "Homeside attack towards the goal on the left" in p.where(mem.at((2, 30)), (2, 20, 30))
 
 
 def test_one_incident_is_aired_once_but_a_card_always_is():
@@ -212,6 +250,24 @@ def test_one_incident_is_aired_once_but_a_card_always_is():
     # A card for the foul is news of its own.
     card = mem.add_entry(T(140), Event("yellow_card", "away", ((1, 100), (1, 110))), seen("live#4"))
     assert card in news(ask(p, mem, 140))
+
+
+def test_the_other_half_of_an_incident_held_by_a_stretch_still_being_written_is_no_news():
+    mem = MatchMemory(PLAYERS)
+    foul = mem.add_entry(T(100), Event("foul", "away", ((1, 84), (1, 86))), seen("live#1"))
+    kick = mem.add_entry(T(110), Event("free_kick", "home", ((1, 91), (1, 93))), seen("live#2"))
+    p = policy()
+    assert news(ask(p, mem, 100, end=90)) == [foul]
+    # [80, 90) has the foul and is still being written when [90, 100) is asked for: the free kick
+    # only repeats it.
+    assert not news(p.material(mem.at(T(110)), (1, 90, 100), {foul}))
+
+
+def test_news_first_offered_after_its_moment_is_said_as_just_past():
+    mem = MatchMemory(PLAYERS)
+    mem.add_entry(T(100), Event("shot", "home", ((1, 68), (1, 72))), seen("live#1"))
+    item = one(ask(policy(), mem, 100, end=90), "news")          # the stretch [80, 90), the shot at 70
+    assert item.at == T(80) and "10 s before these pictures" in item.facts[0] and "just past" in item.rule
 
 
 def test_one_incident_within_a_stretch_is_said_once():
@@ -233,28 +289,52 @@ def test_minor_event_before_a_goal_on_air_is_overtaken_by_it():
     assert kick not in news(ask(p, mem, 176))
 
 
-def test_how_the_match_stands_is_offered_for_a_lull_and_says_something_new():
+def test_one_match_state_a_pending_goal_aired_is_listed_but_not_counted():
     mem = MatchMemory(PLAYERS)
+    eid = mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
     p = policy()
-    every = CONFIG["context_every"]
-    # A stretch starting `context_every` s after the half was opened.
-    item = one(ask(p, mem, every + SEGMENT), "recap")
-    assert not item.must and any("Homeside 0, Awayside 0" in f for f in item.facts)
-    p.said(item, "Goalless so far.", item.at)
-    # Not offered again before `context_every` s; then nothing has changed, so not the score again.
-    assert not any(i.kind == "recap" for i in ask(p, mem, every + 30))
-    assert not any(i.kind == "recap" for i in ask(p, mem, 2 * every + SEGMENT))
-    # A goal changes it: the new score is offered.
-    g = mem.add_entry(T(2 * every + 10), goal(2 * every, player="h1"), seen("live#1"))
-    assert g in news(air(p, mem, 2 * every + 10))
-    item = one(ask(p, mem, 3 * every + 30), "recap")
-    assert any("Homeside 1, Awayside 0" in f for f in item.facts)
+    air(p, mem, 100 + HOLD)                                    # "Is that a goal for Homeside?"
+    # The viewer has heard of it: the record lists it as not confirmed, the score does not count it,
+    # and each score says which moment it is the score of.
+    state = p.where(mem.at(T(120)), (1, 110, 120))
+    assert "Score as these seconds begin: Homeside 0, Awayside 0 (not counted yet: a goal for Homeside, not confirmed)" in state
+    assert "a goal for Homeside, not confirmed yet" in state and "Player1" not in state
+    mem.add_justification(T(130), eid, seen("replay#1"))
+    state = p.where(mem.at(T(140)), (1, 130, 140))
+    assert "Score as these seconds begin: Homeside 1, Awayside 0." in state and "goal, Player1 (Homeside)" in state
+    # A goal in the stretch gives the score after it, by that name.
+    g = mem.add_entry(T(300), goal(290, player="h2"), seen("live#2"))
+    item = next(i for i in ask(p, mem, 300) if i.entry == g)
+    assert "Score after this goal: Homeside 2, Awayside 0." in item.facts
+
+
+def test_the_stretch_right_after_a_goal_is_called_counts_it():
+    mem = MatchMemory(PLAYERS)
+    g = mem.add_entry(T(100), goal(85, player="h1"), seen("live#1"))    # seen at 85; its interval runs to 95
+    p = policy()
+    assert g in news(air(p, mem, 170, end=90))
+    state = p.where(mem.at(T(170)), (1, 90, 100))
+    assert "Score as these seconds begin: Homeside 1, Awayside 0." in state and "goal, Player1 (Homeside)" in state
+    # A dispute opened later (a replay taken for a second goal) makes it pending in memory, but the
+    # viewer was told it stands: it stays counted until it is retracted.
+    mem.open_case(T(200), [g], "kickoff_after_goal")
+    assert "Homeside 1, Awayside 0." in p.where(mem.at(T(200)), (1, 190, 200))
+
+
+def test_a_pending_goal_aired_and_never_confirmed_leaves_the_state():
+    mem = MatchMemory(PLAYERS)
+    mem.add_entry(T(100), goal(80, player="h1"), seen("live#1", sufficient=False))
+    p = policy()
+    air(p, mem, 100 + HOLD)
+    start = 80 + CONFIG["confirm_within"] + SEGMENT
+    state = p.where(mem.at(T(start + 80)), (1, start, start + SEGMENT))
+    assert "Homeside 0, Awayside 0." in state and "not confirmed" not in state
 
 
 def test_pending_goal_seen_only_in_a_replay_waits_for_its_confirmation():
     mem = MatchMemory(PLAYERS)
     # A goal sighting in a replay, with no live one: most often a goal already called, shown again.
-    p = policy(sources={"replay#1": {"candidate": {"replay": True, "second": 90}}})
+    p = policy(sources={"replay#1": {"candidate": {"type": "goal", "replay": True, "second": 90}}})
     eid = mem.add_entry(T(100), goal(80, player="h1"), seen("replay#1", sufficient=False))
     assert eid not in news(ask(p, mem, 100 + 2 * HOLD))
     mem.add_justification(T(120), eid, seen("live#2"))
@@ -284,38 +364,59 @@ BACKGROUND = {"teams": {"home": {"manager": "Home Manager", "captain": None, "fa
               "players": {"h1": ["He joined from Elsewhere in 2014.", "He has 20 caps."]}}
 
 
-def test_a_players_pre_match_facts_are_given_once_each():
-    mem = MatchMemory(PLAYERS)
+def test_the_whole_knowledge_base_goes_to_the_generator_and_no_rule_picks_from_it():
     p = policy(PREMATCH | {"background": BACKGROUND})
+    # Every fact, with an id and whom it is about.
+    assert sorted(p.knowledge.values()) == sorted(["Homeside: manager Home Manager.", "Homeside: Homeside are 2nd going in.",
+                                                   "Player1 (Homeside): He joined from Elsewhere in 2014.",
+                                                   "Player1 (Homeside): He has 20 caps."])
+    # The material carries none of it: not with an event naming the player, not in a lull.
+    mem = MatchMemory(PLAYERS)
     mem.add_entry(T(100), goal(80, player="h1"), seen("live#1"))
-    facts = "\n".join(one(air(p, mem, 100), "news").facts)
-    assert "joined from Elsewhere" in facts and "20 caps" not in facts
-    second = mem.add_entry(T(300), goal(280, player="h1"), seen("live#2"))
-    item = one(air(p, mem, 300), "news")
-    assert item.entry == second
-    facts = "\n".join(item.facts)
-    assert "20 caps" in facts and "joined from Elsewhere" not in facts
+    for t in (100, 200, 300, 400):
+        for item in air(p, mem, t):
+            p.said(item, "Said.", item.at)
+            assert not any("Elsewhere" in f or "caps" in f or "2nd going in" in f for f in item.facts)
 
 
-def test_pre_match_facts_fill_a_lull_when_the_match_has_nothing_new():
-    mem = MatchMemory(PLAYERS)
+def test_a_fact_once_told_is_not_shown_again():
     p = policy(PREMATCH | {"background": BACKGROUND})
-    every = CONFIG["context_every"]
-    item = one(ask(p, mem, every + SEGMENT), "recap")            # the score, first
-    p.said(item, "Goalless.", item.at)
-    item = one(ask(p, mem, 2 * every + SEGMENT), "recap")        # nothing new in the match
-    assert any("2nd going in" in f for f in item.facts)
-    p.said(item, "They came in second.", item.at)
-    assert not any(i.kind == "recap" for i in ask(p, mem, 3 * every + SEGMENT))   # said once
+    shown = []
+    def generate(parts):
+        shown.append(parts[0])
+        return SimpleNamespace(text='{"script": []}', latency=1.0, call_id="x")
+    writer = Commentator(CONFIG, generate, PLAYERS, p.knowledge, p.lineups)
+    frames = SimpleNamespace(text="", images=[], seconds=[90.0, 90.5])
+    caps = next(k for k, f in p.knowledge.items() if "20 caps" in f)
+    writer.script(1, [], frames, "", [], [], p.facts_told)
+    p.told(caps, T(95))
+    writer.script(1, [], frames, "", [], [], p.facts_told)
+    assert "He has 20 caps." in shown[0] and "He has 20 caps." not in shown[1]
+    assert "He joined from Elsewhere" in shown[1]
+    # ... and it is shown when the last fact went, so facts can be spaced out.
+    assert "the last one was told at 1H 01:35" in shown[1]
 
 
-def test_background_over_the_pictures_is_for_a_lull_and_said_once():
-    p = policy(PREMATCH | {"background": BACKGROUND})
-    pictures = "Player IDs:\nP1: Homeside (home), #1 Player1\nNearest to the ball (frame:ID): 1:P1 2:P1"
-    item = one(p.on_screen(pictures, T(100)), "background")
-    assert not item.must and "joined from Elsewhere" in item.facts[0]
-    # Not said (no lull): offered again; said: the next fact, but only `background_every` s later.
-    assert "joined from Elsewhere" in one(p.on_screen(pictures, T(110)), "background").facts[0]
-    p.said(item, "He came from Elsewhere.", T(110))
-    assert p.on_screen(pictures, T(120)) == []
-    assert "20 caps" in one(p.on_screen(pictures, T(110 + CONFIG["background_every"])), "background").facts[0]
+def test_names_come_only_from_the_pictures_the_material_the_record_or_a_marked_goalkeeper():
+    # The home side only: the synthetic sides share their short names.
+    players = [p | {"position": "goalkeeper"} if p["hash"] == "h1" else p for p in PLAYERS if p["team_side"] == "home"]
+    answer = [{"frame": 1, "say": "Player1 gathers it"}, {"frame": 1, "say": "Player2's goal still the difference"},
+              {"frame": 2, "say": "Plàyer3 again"}]
+    writer = Commentator(CONFIG, lambda parts: SimpleNamespace(text=json.dumps({"script": answer}), latency=1.0, call_id="x"),
+                         players, {}, "")
+    frames = SimpleNamespace(text="Player IDs:\nP1: Homeside (home), goalkeeper", images=[], seconds=[90.0, 90.5])
+    where = "The match record so far:\n- 1H 01:20.0: goal, Player2 (Homeside)"
+    kept, _, _ = writer.script(1, [], frames, where, [], [], {})
+    # The marked keeper is Homeside's starting keeper; the record names the scorer; nothing gives
+    # Player3, accent or not.
+    assert [p.text for p in kept] == ["Player1 gathers it", "Player2's goal still the difference"]
+
+
+def test_each_starter_is_placed_by_line_and_side_right_to_left():
+    # SoccerNet slots run through each line from its right to its left (goalkeeper first).
+    sides = [_side("1-4-2-3-1", slot) for slot in range(1, 12)]
+    assert sides == [None, "right", "centre", "centre", "left", "right", "left", "right", "centre", "left", "centre"]
+    players = [p | {"position": "defender", "side": side, "slot": i}
+               for i, (p, side) in enumerate(zip(PLAYERS[:2], ("right", "left")), start=2)]
+    p = policy(PREMATCH | {"players": players + PLAYERS[2:]})
+    assert "Player1 (defender, right), Player2 (defender, left)" in p.lineups

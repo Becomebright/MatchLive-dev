@@ -105,32 +105,34 @@ class IdentityResolver:
         # jersey-number votes.
         self.team_votes: dict[tuple, Counter] = defaultdict(Counter)
         self.number_votes: dict[tuple, Counter] = defaultdict(Counter)
+        # Each player's side, from every roster resolve() has been given (the first is the whole
+        # squad): a confirmed identity of a player no longer on the pitch still has its side.
+        self.sides: dict[str, str] = {}
 
-    def update(self, frame_idx: int, tracks: Sequence[Track], jersey_probs: np.ndarray,
+    def update(self, frame_idx: int, tracks: Sequence[Track], jersey_reads: np.ndarray,
                colors: np.ndarray, roster: Mapping[tuple[str, str], str],
                confirmed: Mapping[tuple, str]) -> list[Track]:
         """Cast this frame's votes and return `tracks` with team / player_id /
         identity_source filled in from the votes so far (= vote() then resolve()).
-        `jersey_probs` (N, 101) and `colors` (N, 3) are the cached observations of these
-        tracks (NaN = none). `roster` ((team, number) -> player_id, see roster_index) and
+        `jersey_reads` (N, 2: the top jersey label and its probability) and `colors` (N, 3) are
+        the cached observations of these tracks (NaN = none). `roster` ((team, number) -> player_id, see roster_index) and
         `confirmed` (track key -> player_id) come from memory and are passed every frame,
         since both change during a match."""
-        self.vote(frame_idx, tracks, jersey_probs, colors)
+        self.vote(frame_idx, tracks, jersey_reads, colors)
         return self.resolve(tracks, roster, confirmed)
 
-    def vote(self, frame_idx: int, tracks: Sequence[Track], jersey_probs: np.ndarray,
+    def vote(self, frame_idx: int, tracks: Sequence[Track], jersey_reads: np.ndarray,
              colors: np.ndarray) -> None:
         """Cast this frame's team and number votes (call in frame order)."""
         cfg = self.config
         # A vote every `vote_every` frames (v2 used 15; reading every frame is affordable
         # now, so the default is 1).
         if frame_idx % cfg["vote_every"] == 0:
-            for track, probs, color in zip(tracks, jersey_probs, colors):
+            for track, read, color in zip(tracks, jersey_reads, colors):
                 self._vote_team(track, color)
-                if not np.isnan(probs[0]):
-                    label = int(np.argmax(probs))
-                    if label != UNREADABLE and probs[label] >= cfg["jersey_min_prob"]:
-                        self.number_votes[track.key][label_to_number(label)] += 1
+                label, prob = read
+                if not np.isnan(label) and int(label) != UNREADABLE and prob >= cfg["jersey_min_prob"]:
+                    self.number_votes[track.key][label_to_number(int(label))] += 1
 
     def resolve(self, tracks: Sequence[Track], roster: Mapping[tuple[str, str], str],
                 confirmed: Mapping[tuple, str]) -> list[Track]:
@@ -173,12 +175,12 @@ class IdentityResolver:
                 if votes[r, c] > 0:
                     assigned[open_tracks[r]] = (players[c], "vote")
 
-        side_of = {player: side for (side, _), player in roster.items()}
+        self.sides.update({player: side for (side, _), player in roster.items()})
         out = []
         for i, (track, team) in enumerate(zip(tracks, teams)):
             player, source = assigned.get(i, (None, None))
             # A number-decided player also fixes an unknown team.
-            out.append(replace(track, team=side_of.get(player, team), player_id=player, identity_source=source))
+            out.append(replace(track, team=self.sides.get(player, team), player_id=player, identity_source=source))
         return out
 
     def off_roster_reads(self, teams: Mapping[tuple, str | None], roster: Mapping[tuple[str, str], str],

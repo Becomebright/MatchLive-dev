@@ -59,7 +59,7 @@ class JerseyReader:
         one, most = "pixel_values:1x3x224x224", f"pixel_values:{self.max_batch}x3x224x224"
         self.session = ort.InferenceSession(
             str(checkpoints_dir / config["model"]),
-            providers=session_providers(config, cache_dir, {
+            providers=session_providers(config, checkpoints_dir / config["model"], cache_dir, {
                 "trt_profile_min_shapes": one,
                 "trt_profile_opt_shapes": most,
                 "trt_profile_max_shapes": most,

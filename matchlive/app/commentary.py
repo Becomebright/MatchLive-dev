@@ -10,8 +10,8 @@ struck — the way a live commentator talks over the play, not after it. Memory 
 feed too, so it already knows about most of what happens in the stretch, with more than a minute of
 hindsight. Nothing that happens after the stretch is said (no spoilers).
 
-The policy is plain rules over memory — no model call. For a stretch it gives the generator:
-  must say, each at the moment it belongs to:
+The policy is plain rules over memory — no model call. For a stretch it gives the generator what
+it must say, each item at the moment it belongs to:
     correction    something already said no longer holds: an event aired as fact (or an aired
                   goal, card, substitution, penalty) has been retracted, or a player named on air
                   is no longer the one memory holds; the reason is what memory says overturned it
@@ -19,7 +19,8 @@ The policy is plain rules over memory — no model call. For a stretch it gives 
                   event, with who took part) is not retracted as far as the viewer is concerned:
                   what was said of it carries over to the new entry;
     confirmation  a goal, card, substitution or penalty aired while pending is now confirmed, or
-                  its player has since been identified;
+                  its player has since been identified, at most `confirm_within` s after it happened
+                  (later, the play has moved on and it goes unsaid);
     opener        the first stretch of each half: the teams, the score, pre-match facts (the
                   venue, the managers, where each side stands going in);
     news          every event memory holds that the viewer sees in the stretch — or saw in the
@@ -30,13 +31,12 @@ The policy is plain rules over memory — no model call. For a stretch it gives 
                   case: it waits for the verdict), and a pending one before `hold` s (a pending
                   minor one not at all, unless `pending_minor`: half of them are false; nor a
                   pending one seen only in replays: a replay re-shows what the viewer has seen, so
-                  it is most often an event already called, or none);
-  may say, in a lull (the ball out of play, a replay, a close-up):
-    recap         every `context_every` s: one angle on how the match stands (score, counts, who
-                  has the pressure, bookings, the busiest player) that has something new — or,
-                  when the match has nothing new, a pre-match fact about a side;
-    background    a pre-match fact on a player the pictures identify (one every `background_every`
-                  s at most).
+                  it is most often an event already called, or none).
+How the match stands is no item of its own: every stretch comes with the match as it stands when
+the stretch begins (`where`) — the score and the match record (goals, cards, substitutions; one
+aired while pending is listed as not confirmed yet, and not counted in the score) — and the
+generator says it when the play allows. One state, so the score in one place never disagrees with
+another (a goal in the stretch gives the score after it, by that name).
 A must-say item the script leaves out (or that cannot go on air in time) is not marked as said, so
 it is offered again with the next stretch while it is still news.
 
@@ -48,20 +48,26 @@ confirmed event names its players (those memory has identified); a pending one n
 — and a pending goal, card, penalty or substitution is also hedged ("looks like ..."). What was said
 about each entry is kept, so a later change of status or player is noticed and aired.
 Pre-match background (Match.prematch["background"], DESIGN.md §6.8) is the only background a phrase
-may use: a player's facts come with the first events that name him, or over the pictures that
-show him, and each fact is offered once.
+may use. No rule picks it: the knowledge base goes with every stretch, each fact with an id
+(`knowledge`), and the generator chooses which fact fits a lull, if any, and marks the phrase that
+tells it; a fact once told, or chosen by a stretch still being written, leaves the list, so none is
+told twice, and the list says when the last one was told. The starting line-ups go with
+it (`lineups`): each starter's line and side in the formation, so the generator knows whose wing
+is whose.
 
-The generator makes one cached model call per stretch from the pictures and the material alone,
-and may not add names or facts. It holds no memory; the runtime lends the policy a memory view
+The generator makes one cached model call per stretch from the pictures, the material and the
+knowledge base alone, and may not add names or facts: a phrase naming a roster player whom neither
+the pictures' who-is-who, the material nor the fact it tells names, or saying a track label, is
+dropped. It holds no memory; the runtime lends the policy a memory view
 each time (DESIGN.md §8).
 """
 
 from __future__ import annotations
 
 import re
-from collections import Counter
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from matchlive.events.analyzer import clock, parse_json
 from matchlive.memory.types import Time
@@ -117,7 +123,7 @@ class Aired:
 @dataclass
 class Item:
     """One piece of material for a stretch, as the policy chose it."""
-    kind: str                               # correction | confirmation | opener | news | recap | background
+    kind: str                               # correction | confirmation | opener | news
     facts: list[str]
     rule: str                               # how to word it (DESIGN.md §6.9)
     entry: str | None = None
@@ -125,9 +131,7 @@ class Item:
     named: dict[str, str] = field(default_factory=dict)   # role -> player the line may name
     t_event: Time | None = None             # when the event happened (best estimate)
     event_type: str | None = None           # the event's type, for a line about an event
-    angle: tuple | None = None              # (angle, value) a recap or background line is about
     at: Time | None = None                  # the video time to say it at
-    must: bool = True                       # must be said in its stretch (else: only in a lull)
 
 
 class CommentaryPolicy:
@@ -140,24 +144,43 @@ class CommentaryPolicy:
         self.sources = sources
         self.players = {p["hash"]: p for p in prematch["players"]}
         self.aired: dict[str, Aired] = {}
-        self.context_said: dict[str, tuple] = {}  # context angle -> (value, video second) last said
-        self.last_context: Time | None = None    # video time of the last line on how the match stands
         self.halves_opened: set[int] = set()
         self.last_big: Time | None = None        # when the last goal, card, penalty or change aired happened
         self.bg = prematch.get("background") or {}   # pre-match background (DESIGN.md §6.8)
-        self.offered: set[str] = set()           # background facts already given to a line (each once)
-        self.last_bg: Time | None = None         # video time a fact was last said over the pictures
+        # The whole knowledge base for the generator to pick from, each fact with an id ("K12") and
+        # the team or player it is about in front: the sides' managers, captains and facts, then
+        # every player's (bench included), home side first.
+        teams = prematch["teams"]
+        facts = []
+        for side in ("home", "away"):
+            bg = self.bg.get("teams", {}).get(side, {})
+            facts += [f"{teams[side]}: {k} {bg[k]}." for k in ("manager", "captain") if bg.get(k)]
+            facts += [f"{teams[side]}: {f}" for f in bg.get("facts", [])]
+        for side in ("home", "away"):
+            facts += [f"{p['short_name']} ({teams[side]}): {f}" for pid, fs in self.bg.get("players", {}).items()
+                      if (p := self.players.get(pid)) and p["team_side"] == side for f in fs]
+        self.knowledge: dict[str, str] = {f"K{i + 1}": f for i, f in enumerate(facts)}
+        self.facts_told: dict[str, Time] = {}    # fact id -> when it went on air
+        # The starting line-ups, each starter by line and side ("Azpilicueta (defender, left)").
+        forms = self.bg.get("formations", {})
+        self.lineups = "\n".join(
+            f"- {teams[side]}" + (f" ({forms[side]})" if forms.get(side) else "") + ": " + ", ".join(
+                f"{p['short_name']} ({p['position']}" + (f", {p['side']})" if p.get("side") else ")")
+                for p in sorted((p for p in prematch["players"] if p["team_side"] == side and p["starting"]),
+                                key=lambda p: p.get("slot") or 0))
+            for side in ("home", "away"))
 
     # ---- deciding ----
 
-    def material(self, view: View, segment: tuple[int, float, float]) -> list[Item]:
-        """What the commentary over the stretch `segment` = (half, start, end) of video must say and
-        may say, each item at the moment it belongs to. `view` is the match as known now: the
+    def material(self, view: View, segment: tuple[int, float, float], held: Collection[str]) -> list[Item]:
+        """What the commentary over the stretch `segment` = (half, start, end) of video must say,
+        each item at the moment it belongs to. `view` is the match as known now: the
         output runs `output_delay` s behind the live feed, so memory already knows about the
-        stretch, with that much hindsight. Nothing that happens after the stretch is said."""
+        stretch, with that much hindsight. Nothing that happens after the stretch is said.
+        `held` are the entries given to stretches still being written: not news again, and an
+        event that only echoes one of them is no news either."""
         half, start, end = segment
         mem = view.mem
-        opening = mem.at((half, start), known_by=view.time)     # the match as the stretch begins
         records = {r.entry_id: r for r in view.events()}
         confirm, announce = self.cfg["confirm"], self.cfg["announce"]
         items: list[Item] = []
@@ -183,61 +206,124 @@ class CommentaryPolicy:
                 if a.status == "confirmed" or ty in confirm:
                     items.append(self._correction(view, r, a, named, "retracted", (half, start)))
                 continue
-            # A name said on air is corrected only once memory holds a different player; while the
-            # event is merely disputed (pending, so no name may be said) the line waits.
-            changed = {role: pid for role, pid in a.named.items() if named.get(role) not in (None, pid)}
+            # A name said on air is corrected once memory holds a different player, or none, for the
+            # confirmed event; while the event is merely disputed (pending, so no name may be said)
+            # the line waits.
+            changed = {role: pid for role, pid in a.named.items()
+                       if named.get(role) != pid and (r.status == "confirmed" or named.get(role) is not None)}
             if changed:
                 items.append(self._correction(view, r, a, named, "player", (half, start)))
                 continue
             new_names = {role: pid for role, pid in named.items() if role not in a.named}
-            if ty in confirm and ((a.status == "pending" and r.status == "confirmed") or new_names):
+            # Confirmed long after it happened, it goes unsaid: the play has moved on, and a line about
+            # a moment minutes back only puzzles the viewer (the match record still lists it).
+            h, second, _ = self._when(view, r)
+            if ty in confirm and ((a.status == "pending" and r.status == "confirmed") or new_names) \
+                    and h == half and start - second <= self.cfg["confirm_within"]:
                 items.append(self._event_item(view, r, "confirmation", named, (half, start), a))
 
         # 3. The first stretch of a half opens it.
         if half not in self.halves_opened:
-            items.append(self._opener(opening, (half, start)))
+            items.append(self._opener(view, (half, start)))
 
         # 4. News: every unaired event the viewer sees by the end of the stretch (and saw at most
         # `recent` s before it), the most important first when one echoes another.
-        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.status != "retracted"
-                 and r.event.type in announce and self._seen(view, r, (half, end)) and self._ready(view, r)]
+        fresh = [r for r in records.values() if r.entry_id not in self.aired and r.entry_id not in held
+                 and r.status != "retracted" and r.event.type in announce and self._seen(view, r, (half, end))
+                 and self._ready(view, r)]
         chosen: list[EventRecord] = []
         for r in sorted(fresh, key=lambda r: (announce.index(r.event.type), self._when(view, r)[1])):
-            if not self._echoes(r, records, chosen):
+            if not self._echoes(r, records, chosen + [records[eid] for eid in held if eid in records]):
                 chosen.append(r)
         for r in sorted(chosen, key=lambda r: self._when(view, r)[1]):
             # Said at the moment it happens; one the viewer saw before the stretch, first thing.
             items.append(self._event_item(view, r, "news", self._named(r), (half, max(start, self._when(view, r)[1]))))
 
-        # 5. Now and then, how the match stands (in a lull).
-        if self.last_context is None or self.last_context[0] != half \
-                or start - self.last_context[1] >= self.cfg["context_every"]:
-            item = self._recap(opening)
-            if item is not None:
-                items.append(item)
         return items
 
     def where(self, view: View, segment: tuple[int, float, float]) -> str:
-        """The time and the score as the stretch begins, for the generator."""
+        """The match as it stands when the stretch begins, for the generator: the time, which way
+        each team attacks this half, the score and, with `story`, the match record — what the
+        viewer has seen before the stretch, as memory knows it now: its goals, cards and
+        substitutions, each placed at its sighting, as the news is. "confirmed" lists the counted
+        entries, and those aired while pending as not confirmed yet (the viewer has heard of them;
+        the score does not count them) until `confirm_within` s have passed without a
+        confirmation; "all" every pending entry too. No counts of shots, corners or fouls: memory
+        confirms only some of them, so a count is short of the true one (results §41)."""
         half, start, _ = segment
-        return f"Time: {self._clock(half, start)}. {self._score(view.mem.at((half, start), known_by=view.time))}"
+        teams = self.prematch["teams"]
+        records = []
+        for r in view.events():
+            h, second, _ = self._when(view, r)
+            if r.event.type not in ("goal", "yellow_card", "red_card", "substitution", "penalty") or (h, second) >= (half, start):
+                continue
+            if self._counted(r):
+                records.append((r, h, second, True))
+            elif r.status == "pending" and (self.cfg["story"] == "all" or r.entry_id in self.aired) \
+                    and h == half and start - second <= self.cfg["confirm_within"]:
+                records.append((r, h, second, False))
+        score = self._goals(view, (half, start))
+        out = (f"Time: {self._clock(half, start)}.\n{self._ends(half)}\n"
+               f"Score as these seconds begin: {teams['home']} {score['home']}, {teams['away']} {score['away']}"
+               + "".join(f" (not counted yet: {self._phrase(r.event)}, not confirmed)"
+                         for r, _, _, counted in records if not counted and r.event.type == "goal") + ".")
+        if self.cfg["story"] == "off":
+            return out
+        lines = []
+        for r, h, second, counted in records:
+            who = {part.role: pid for part, pid in zip(r.event.participants, r.players) if pid}
+            if not counted:
+                what = f"{self._phrase(r.event)}, not confirmed yet"
+            elif r.event.type == "substitution" and "in" in who and "out" in who:
+                what = f"{teams[self.players[who['in']]['team_side']]} substitution, {self.players[who['in']]['short_name']} " \
+                       f"on for {self.players[who['out']]['short_name']}"
+            elif "player" in who:
+                what = f"{EVENT_WORDS[r.event.type]}, {self._player(who['player'], brief=True)}"
+            else:
+                what = self._phrase(r.event)
+            lines.append(f"- {self._clock(h, second)}: {what}")
+        return out + "\nThe match record so far:\n" + ("\n".join(lines) or "- no goals, cards or substitutions yet")
+
+    def _counted(self, r: EventRecord) -> bool:
+        """Whether an event counts in the score and the record: confirmed, or aired as confirmed and
+        not retracted since — a dispute opened later (a replay taken for a new goal) leaves it
+        pending in memory, but does not take back what the viewer was told."""
+        a = self.aired.get(r.entry_id)
+        return r.status == "confirmed" or (r.status == "pending" and a is not None and a.status == "confirmed")
+
+    def _goals(self, view: View, before: Time) -> dict[str, int]:
+        """The score from the counted goals sighted before `before`."""
+        score = {"home": 0, "away": 0}
+        for r in view.events(type="goal"):
+            if r.event.team in score and self._counted(r) and self._when(view, r)[:2] < before:
+                score[r.event.team] += 1
+        return score
+
+    def _ends(self, half: int) -> str:
+        """Which way each team attacks this half, in the main camera's wide picture, and so where its
+        left and right wings are: the camera stands on one touchline, so a team attacking to the
+        right of the picture has its left wing on the far touchline."""
+        teams, sides = self.prematch["teams"], self.prematch["sides"][half]
+        out = []
+        for side in ("home", "away"):
+            attack = {"left": "right", "right": "left"}[sides[side]]
+            near, far = ("left", "right") if attack == "left" else ("right", "left")
+            out.append(f"{teams[side]} attack towards the goal on the {attack} of the main camera's wide picture: "
+                       f"their {far} wing is the far touchline, their {near} wing the near one.")
+        return "This half, " + " ".join(out)
 
     def said(self, item: Item, text: str, at: Time) -> None:
         """Record that `item` went on air as `text` (its phrases), from video time `at`."""
         if item.kind == "opener":
             self.halves_opened.add(at[0])
-        if item.kind in ("opener", "recap"):
-            self.last_context = at
-        if item.kind == "background":
-            self.last_bg = at
-        if item.angle is not None:
-            self.context_said[item.angle[0]] = (item.angle[1], at[1])
-            if item.angle[0].startswith("background:"):
-                self.offered.add(item.angle[0].removeprefix("background:"))
         if item.entry is not None:
             self.aired[item.entry] = Aired(item.status, dict(item.named), text)
         if item.kind in ("news", "confirmation") and item.event_type in self.cfg["confirm"]:
             self.last_big = item.t_event
+
+    def told(self, fact: str, at: Time) -> None:
+        """Record that the pre-match fact `fact` (its id) went on air at video time `at`."""
+        self.facts_told.setdefault(fact, at)
 
     def _seen(self, view: View, r: EventRecord, upto: Time) -> bool:
         """Whether the viewer has seen the event by `upto`, at most `recent` s before it (`recent_minor`
@@ -296,28 +382,37 @@ class CommentaryPolicy:
                     before: Aired | None = None) -> Item:
         e = r.event
         half, second, replay = self._when(view, r)
-        # News is the play on screen: no minute, and the score only with a goal.
-        facts = [f"What: {self._phrase(e)}" + (" — being shown again in a replay" if replay else "") + "."]
+        # News is the play on screen: no minute, and the score only with a goal. News first offered
+        # after its moment (late, or offered again) is said as just past, not called again.
+        past = f", {at[1] - second:.0f} s before these pictures" if kind == "news" and at[1] - second > self.cfg["late"] else ""
+        facts = [f"What: {self._phrase(e)}{past}" + (" — being shown again in a replay" if replay else "") + "."]
         for role, pid in named.items():
-            facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid, view, e.type)}")
+            facts.append(f"{ROLE_WORDS[role].capitalize()}: {self._player(pid)}")
         if r.status == "confirmed":
             if e.type == "goal":                  # the score counts confirmed goals only, up to this one
-                facts.append(self._score(view.mem.at(e.t_interval[1], known_by=view.time)))
-            support = self._support(view, r.entry_id)
-            if support:
-                facts.append(f"Seen: {support}.")
-            rule = "Call it as it happens" + (", naming the player(s) given." if named
-                                              else "; you don't know who it was, so name nobody.")
+                score = self._goals(view, (half, second))
+                if e.team in score:
+                    score[e.team] += 1
+                facts.append(self._score(score, "after this goal"))
+            rule = ("Say it as just past (\"... there\"), not as if it were happening now" if past else "Call it as it happens") \
+                + (", naming the player(s) given." if named else "; you don't know who it was, so name nobody.")
         elif e.type in self.cfg["confirm"]:
             facts.append("Not certain yet.")
-            rule = "You are not sure yet: hedge it (\"looks like...\", \"is that...?\") and name nobody, only the team."
+            rule = "You are not sure yet: hedge it (\"looks like...\", \"is that...?\")" + (" as just past" if past else "") \
+                + " and name nobody, only the team."
         else:
             # A pending minor event is simply said without a player (DESIGN.md §6.9: the team only).
-            rule = "Name nobody, only the team."
+            rule = "Name nobody, only the team" + (", and say it as just past." if past else ".")
         if kind == "confirmation":
+            # Confirmed after it happened, with the play moved on: said as news about that earlier
+            # moment, not called again as if it were happening now.
+            facts[0] = f"What: {self._phrase(e)}, earlier — {at[1] - second:.0f} s ago, not in these pictures."
             facts.append(f"What you said before: \"{before.text}\"")
-            rule = ("Now it is certain: say so the way a commentator would"
-                    + (", naming the player(s) given." if named else "."))
+            rule = ("The play has moved on since: in a pause in this stretch, tell the viewer calmly what is now "
+                    "certain about that earlier moment, making clear it is the one from before (\"That goal a "
+                    "minute ago is given to ...\", \"And that change is confirmed: ...\")"
+                    + (", naming the player(s) given" if named else "") + ". Not as if it were happening now. If these seconds have no pause (the ball "
+                    "in play, an attack on), leave it out: it comes again with the next stretch.")
         return Item(kind, facts, rule, r.entry_id, r.status, named, (half, second), e.type, at=at)
 
     def _correction(self, view: View, r: EventRecord, before: Aired, named: dict[str, str], what: str,
@@ -325,24 +420,25 @@ class CommentaryPolicy:
         e = r.event
         half, second, _ = self._when(view, r)
         facts = [f"What you said before: \"{before.text}\"", f"About: {self._phrase(e)}, in {self._clock(half, second)}."]
-        reason = _plain(self._reason(view, r.entry_id))
+        reason = self._reason(view, r.entry_id)
         if what == "retracted":
             facts.append(f"What turned out: {reason}")
             rule = ("Put it right the way a commentator does on air (\"No, ...\", \"Actually, ...\"), briefly, "
                     "with the reason in plain words.")
         else:
             for role, pid in before.named.items():
-                if named.get(role) not in (None, pid):
-                    facts.append(f"You named {self._player(pid, view, brief=True)} as the {ROLE_WORDS[role]}; "
-                                 f"it was actually {self._player(named[role], view, brief=True)}.")
+                if named.get(role) != pid:
+                    facts.append(f"You named {self._player(pid, brief=True)} as the {ROLE_WORDS[role]}; "
+                                 + (f"it was actually {self._player(named[role], brief=True)}." if named.get(role)
+                                    else "it is no longer known who it was."))
             facts.append(f"What turned out: {reason}")
             rule = "Put the name right the way a commentator does on air, briefly."
         if e.type == "goal":
-            facts.append(self._score(view.mem.at(e.t_interval[1], known_by=view.time)))
+            facts.append(self._score(self._goals(view, (half, second)), "without it"))
         return Item("correction", facts, rule, r.entry_id, r.status, named, (half, second), at=at)
 
     def _opener(self, view: View, at: Time) -> Item:
-        half, teams, kits = view.time[0], self.prematch["teams"], self.prematch["jersey_colors"]
+        half, teams, kits = at[0], self.prematch["teams"], self.prematch["jersey_colors"]
         facts = [f"{'Kick-off' if half == 1 else 'The second half is under way'}: {teams['home']}, in {kits['home'][0]} "
                  f"at home, against {teams['away']} in {kits['away'][0]}."]
         if half == 1:
@@ -360,109 +456,25 @@ class CommentaryPolicy:
                 bg = self.bg.get("teams", {}).get(side, {})
                 if bg.get("manager"):
                     facts.append(f"{teams[side]}'s manager: {bg['manager']}.")
-                facts += [f"Background: {f}" for f in self._take(bg.get("facts", [])[:1])]
         else:
-            facts.append(self._score(view))
+            facts.append(self._score(self._goals(view, at), "at half-time"))
         return Item("opener", facts, "Welcome the viewers and open the half in two or three short spoken sentences"
                                      + (" (where we are, who manages the sides and how they come into it)" if half == 1 else "")
                                      + ", then follow the play.", at=at)
 
-    def _recap(self, view: View) -> Item | None:
-        """One angle on how the match stands at the start of the stretch (`view` is the match as of
-        then): the score, a side's counts, who has had the recent pressure, a booking, the busiest
-        player. An angle is offered only when there is something new in it since it was last said
-        (the score or the pressure changed, a new booking, ...) or it has not been said for a while;
-        the angles take turns. None when there is nothing new to say."""
-        teams = self.prematch["teams"]
-        half, now = view.time
-        angles = []                                 # (angle, value, fact)
-        angles.append(("score", tuple(view.score.values()), self._score(view)))
-        recent = Counter(r.event.team for r in view.events(since=(half, max(0.0, now - 600)), status="confirmed")
-                         if r.event.team and r.event.type in ("shot", "corner", "goal", "free_kick"))
-        if sum(recent.values()) >= 3:
-            lead = max(recent, key=recent.get)
-            angles.append(("pressure", lead, f"Last ten minutes: {teams[lead]} have had most of the attacking play "
-                                             f"({recent[lead]} of {sum(recent.values())} shots, corners and free kicks)."))
-        for side in ("home", "away"):
-            stats = view.team_stats[side]
-            parts = [f"{stats[t]} {EVENT_WORDS[t]}{'s' if stats[t] != 1 else ''}"
-                     for t in ("shot", "corner", "free_kick", "offside") if stats[t]]
-            if parts:
-                angles.append((f"counts:{side}", tuple(parts), f"{teams[side]} so far: {', '.join(parts)}."))
-        for c in view.cards:
-            if c.player_id:
-                angles.append((f"booked:{c.player_id}", c.kind, f"Booked earlier: {self._player(c.player_id, view, brief=True)}."))
-        busiest = sorted(((n, pid) for pid, st in view.player_stats.items() for ty, n in st.items() if ty == "shot"),
-                         reverse=True)[:1]
-        if busiest and busiest[0][0] >= 2:
-            n, pid = busiest[0]
-            angles.append(("busiest", (pid, n), f"Most shots so far: {self._player(pid, view, brief=True)}, {n}."))
-        # What is new: an angle never said, or said with another value, or not said for `context_stale` s.
-        fresh = [a for a in angles if a[0] not in self.context_said or self.context_said[a[0]][0] != a[1]
-                 or now - self.context_said[a[0]][1] >= self.cfg["context_stale"]]
-        # When the match has nothing new: a pre-match fact about a side (each once).
-        if not fresh:
-            for side in ("home", "away"):
-                bg = self.bg.get("teams", {}).get(side, {})
-                facts = bg.get("facts", []) + ([f"{teams[side]}'s captain: {bg['captain']}."] if bg.get("captain") else [])
-                fresh += [(f"background:{f}", None, f"Background: {f}") for f in facts if f not in self.offered]
-            fresh = fresh[:1] if fresh and fresh[0][0].startswith("background:") else fresh
-        if not fresh:
-            return None
-        # Take turns: the angle said longest ago (never said first).
-        angle, value, fact = min(fresh, key=lambda a: self.context_said.get(a[0], (None, -1.0))[1])
-        rule = ("Work this pre-match background into one natural spoken remark." if angle.startswith("background:")
-                else "Work this into a natural remark on how the match stands; don't list numbers.")
-        return Item("recap", [fact], rule, t_event=None, angle=(angle, value), at=view.time, must=False)
-
-    def on_screen(self, pictures: str, at: Time) -> list[Item]:
-        """Background on a player the pictures identify (in their who-is-who text) — the one on the
-        ball most, if he has a fact not yet given — for a lull in the stretch: one fact, at most
-        every `background_every` s."""
-        if self.last_bg is not None and self.last_bg[0] == at[0] \
-                and at[1] - self.last_bg[1] < self.cfg["background_every"]:
-            return []
-        # Who is who ("P3: Chelsea (home), #21 Matic"), and who is nearest the ball in each frame
-        # ("Nearest to the ball (...): 1:P3 2:P3 3:- ..."): the player on the ball most, first.
-        local = {}
-        for line in pictures.splitlines():
-            for p in self.prematch["players"]:
-                if line.startswith("P") and f"({p['team_side']}), #{p['jersey_number']} {p['short_name']}" in line:
-                    local[line.split(":")[0]] = p
-        ball = next((line for line in pictures.splitlines() if line.startswith("Nearest to the ball")), "")
-        carried = Counter(re.findall(r"\d+:(P\d+)", ball))
-        shown = sorted(local, key=lambda pid: (-carried[pid], int(pid[1:])))
-        for p in (local[pid] for pid in shown):
-            for fact in self.bg.get("players", {}).get(p["hash"], []):
-                if fact not in self.offered:
-                    return [Item("background", [f"Background on {p['short_name']}: {fact}"],
-                                 "Say it briefly in your own words while he is on screen, tied to what he is doing.",
-                                 angle=(f"background:{fact}", None), at=at, must=False)]
-        return []
-
     # ---- helpers ----
 
     def _when(self, view: View, r: EventRecord) -> tuple[int, float, bool]:
-        """(half, second, replay only): the median live sighting, else the middle of the interval."""
+        """(half, second, replay only): the median live sighting, else the middle of the interval.
+        Only sightings of this type count: a foul's paired free kick stands behind it too."""
         mem = view.mem
-        seen = [self.sources[j.obs_id]["candidate"] for _, j in mem.justifications[r.entry_id]
-                if j.obs_id in self.sources and mem.holds(j)]
+        seen = [c for _, j in mem.justifications[r.entry_id] if j.obs_id in self.sources and mem.holds(j)
+                and (c := self.sources[j.obs_id]["candidate"])["type"] == r.event.type]
         live = sorted(c["second"] for c in seen if not c["replay"])
         (half, lo), (_, hi) = r.event.t_interval
         if live:
             return half, live[len(live) // 2], False
         return half, (lo + hi) / 2, bool(seen)
-
-    def _support(self, view: View, eid: str) -> str:
-        """What made an entry certain, as a commentator would put it: a second look (the arbiter's
-        check) or the replay; nothing when two sightings simply agree."""
-        mem = view.mem
-        holding = [j for _, j in mem.justifications[eid] if mem.holds(j)]
-        if any(j.kind == "verdict" for j in holding):
-            return "a second look at the pictures confirms it"
-        if any(self.sources.get(j.obs_id, {}).get("candidate", {}).get("replay") for j in holding):
-            return "the replay shows it"
-        return ""
 
     def _reason(self, view: View, eid: str) -> str:
         """Why an entry changed: the summary of the verdict that rejected its observations or
@@ -483,9 +495,11 @@ class CommentaryPolicy:
             return "it is now in doubt"
         return "a second look at the pictures"
 
-    def _score(self, view: View) -> str:
+    def _score(self, score: Mapping[str, int], when: str) -> str:
+        """"Score after this goal: Chelsea 0, Liverpool 2." — always saying which moment it is the
+        score of, so it is never taken for the score at another one."""
         teams = self.prematch["teams"]
-        return f"Score now: {teams['home']} {view.score['home']}, {teams['away']} {view.score['away']}."
+        return f"Score {when}: {teams['home']} {score['home']}, {teams['away']} {score['away']}."
 
     def _phrase(self, e) -> str:
         """"a corner for Chelsea"; "a corner" when the side is unknown."""
@@ -493,92 +507,97 @@ class CommentaryPolicy:
             return f"a {EVENT_WORDS[e.type]}"
         return WITH_TEAM[e.type].format(team=self.prematch["teams"][e.team])
 
-    def _player(self, pid: str, view: View, ty: str | None = None, brief: bool = False) -> str:
-        """A player as a commentator names them — by the name fans use — with the background the
-        line may draw on (DESIGN.md §6.9): full name, side and position, and how many of this kind
-        of event they have had in the match when it is not their first."""
+    def _player(self, pid: str, brief: bool = False) -> str:
+        """A player as a commentator names them — by the name fans use — with what the line may
+        draw on (DESIGN.md §6.9): full name, side and position. No count of their events in the
+        match: memory confirms only some of them (results §41)."""
         p = self.players[pid]
         team = self.prematch["teams"][p["team_side"]]
         if brief:
             return f"{p['short_name']} ({team})"
         role = p["position"] or ("substitute" if not p["starting"] else "player")
         country = self.bg.get("nationality", {}).get(pid)
-        out = f"{p['short_name']} (full name {p['long_name']}; {team} {role}" + (f", from {country})" if country else ")")
-        n = view.player_stats.get(pid, {}).get(ty, 0) if ty else 0
-        if n >= 2:
-            out += f"; his {_ordinal(n)} {EVENT_WORDS[ty]} of the match"
-        for fact in self._take(self.bg.get("players", {}).get(pid, [])):
-            out += f"; background you may use: {fact}"
-        return out
-
-    def _take(self, facts: Sequence[str], n: int = 1) -> list[str]:
-        """The first `n` facts not yet given to a line, now marked as given."""
-        new = [f for f in facts if f not in self.offered][:n]
-        self.offered.update(new)
-        return new
+        return f"{p['short_name']} (full name {p['long_name']}; {team} {role}" + (f", from {country})" if country else ")")
 
     @staticmethod
     def _clock(half: int, second: float) -> str:
-        """The minute of play as a commentator says it: "the 16th minute of the second half",
-        "first-half stoppage time"."""
-        minute = int(second // 60) + 1
-        name = "first" if half == 1 else "second"
-        if minute > 45:
-            return f"{name}-half stoppage time"
-        return f"the {_ordinal(minute)} minute of the {name} half"
+        """A match time as the generator reads every time: "1H 35:30.0" (the half and its clock,
+        as the frames and the phrases are stamped)."""
+        return f"{half}H {clock(second)}"
 
 
-def _ordinal(n: int) -> str:
-    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
-
-
-def _plain(reason: str) -> str:
-    """A verdict's summary without the system's codes — entry and case ids, track keys, shirt
-    numbers, clock times to the tenth — which a commentator would never say."""
-    reason = re.sub(r"\(?\btracks? \d+/\d+/\d+\)?", "", reason)
-    reason = re.sub(r"\(?\b[ECI]\d+\b\)?|#\d+|\(\s*\)|\b\d{1,2}:\d{2}(\.\d+)?\b", "", reason)
-    return re.sub(r"\s+([,.;])", r"\1", re.sub(r"\s{2,}", " ", reason)).strip()
-
-
-PROMPT = """You are the TV commentator of this football match, speaking live on air in {language}. Below are the next
+PROMPT = """You are the TV commentator of this football match, speaking live on air in {language}. At the end are the next
 {span:.0f} seconds of the broadcast pictures, one frame every {step:.1f} s, each with its time. Tracked players carry a
-label (P1, P2, ...); the text before the frames says who each one is, as far as is known, who is nearest the ball in
-each frame, and where the camera cuts. Write what you say over these seconds as a timed script: each phrase starts at
+label (P1, P2, ...); the text before the frames says who each one is, as far as is known, who has the ball at his
+feet in each frame, and where the camera cuts. Write what you say over these seconds as a timed script: each phrase starts at
 the frame where you say it.
 
 Talk the way a live TV commentator does:
-- Follow the ball. Name a player as he gets it ("Kante."), say what he does with it ("Out to Willian."), react as it
-  happens ("Oh, good save!"). Most phrases are one to six words, said as the play moves, not after it.
+- Follow the play, not every touch: the viewer sees the passing. Name a player when what he does matters (a run at
+  the defence, a cross, a shot, a tackle, a pass that opens the play), not each one who touches the ball, and react
+  as it happens ("Oh, good save!"). Between those moments, talk about the play as a commentator and his
+  co-commentator do: which side is on top, where the space is, what a team keeps trying, what the score asks of
+  them, drawing on what you have seen in these minutes, concretely ("Third time Willian has been crowded out down
+  that side"), not a stock line you could say at any moment ("Liverpool comfortable here"). Let a thought run on over
+  two or three phrases ("Willian to the byline," "looks for the cross," "and Milner gets there first."), and vary how
+  phrases begin rather than opening each with a name. Most phrases are five to ten words. Say how the match stands
+  (the score, who is on top, what a side needs; from the score and the match record below) at most once a minute,
+  in a lull: after that, something new or nothing. When
+  you can't tell who has the ball, say the team ("Chelsea work it wide"), not a shirt colour or "one of theirs".
 - Call what any viewer can see, at the frame where it happens: a shot (at the strike, not after it), a save, a
   block, a cross, a header, a tackle, a clearance. Don't call goals, fouls, free kicks, corners, offsides, cards,
   penalties or substitutions yourself: those are the referee's and the match record's, and come in the material
-  below with how sure they are — say each the way its rule says. A replay is a replay ("Another look at it..."), not
-  a new chance.
+  below with how sure they are — say each the way its rule says. A replay (a cut to a slower or closer view of a moment
+  already seen) is a replay ("Another look at it..."), not a new chance.
 - Give each phrase the energy the play has at that moment: "calm" (a lull: the ball out, a replay, a stoppage, a
   remark), "lively" (the ball moving), "rising" (an attack nearing the box), "excited" (a shot, a save, a goal, a big
   chance). The voice follows it.
-- Time it: a phrase takes about a third of a second a word to say, and the next one starts after it. Leave the
-  pictures quiet where nothing happens, but don't go silent through an attack.
-- Name a player only when the text identifies him or the material names him; otherwise say the team. Never say shirt
-  numbers or the labels. Say only what the pictures and the material give: no background of your own about players,
-  clubs or seasons (it may be wrong, or tell what happens later). At most {max_words} words a phrase.
-- In a lull, and only then, you may use the optional material (how the match stands, pre-match background), briefly
-  and in your own words.
-- Carry on from your recent phrases: don't repeat them or start the same way.
+- Time it: a phrase takes about {base:.1f} s plus {word:.1f} s a word to say, and the next one starts only after it ends
+  (a phrase of four words fills about {four:.0f} frames). These {span:.0f} seconds hold about {phrases:.0f} phrases and {room:.0f}
+  words in all, and most stretches need fewer: a phrase that does not fit is not said. Say a few full phrases rather
+  than many short ones. Leave the pictures quiet where nothing happens, but don't go silent through an attack.
+- Left and right are a team's own, as it attacks (its left wing, its right-back), never the screen's: take them
+  from which way each team attacks this half (given with the time below) and the line-ups, and only in the main
+  camera's wide view; a close-up or a replay may be shot from another angle. When unsure, say no side.
+- Name a player only when the text with the pictures identifies him (a goalkeeper it marks is his side's keeper in
+  the line-ups), the material or the match record names him, or the fact you tell is about him (being in the
+  line-ups is not enough); otherwise say the team. Never say shirt numbers or the labels.
+  Say what the pictures, the material and what you know before the match (below) give: what you know before the
+  match is the knowledge of players, clubs and seasons to trust and use. At most {max_words} words a phrase.
+- A lull (the ball out, a replay, a close-up), and only a lull, is where a fact you know before the match goes:
+  one that fits the moment (the player on the ball or just substituted, the side pressing, the score), told the
+  way a commentator tells a story, not as a fact card of bare dates and fees, and mark the phrase with its id. Not
+  every lull: one fact every few minutes is plenty (when the last one was told is given with them).
+- The match record lists the goals, cards and substitutions so far. Use it to understand the game and for your
+  remarks. The score is the one given here, never the scoreboard in the pictures: it changes only some seconds
+  after a goal. You have no counts of shots, corners or fouls: don't give any.
+- Carry on from what was just said and from the play just before your stretch: don't say again what was said or
+  given to say there, don't start the same way, and pick the play up where it is. Your first frames are often the
+  moment your last phrases described ("Willian on the byline"): go on to what happens next ("...and the cross is
+  cut out"), never describe it again.
+
+The starting line-ups, each player by his line in the formation and his side of it:
+{lineups}
+
+What you know before the match, each fact with its id (the ones already told are left out{last}):
+{knowledge}
 
 {where}
 
-Your recent phrases:
+Your recent phrases, each with when it began:
 {history}
+
+Just before your stretch, still being said (its words are not known yet):
+{before}
 
 Material you must say, each at about the frame given (put it where it happens in the pictures):
 {must}
 
-Optional material, only for a lull:
-{may}
+The pictures:"""
 
-Answer with JSON only: {{"script": [{{"frame": 3, "say": "...", "energy": "calm" | "lively" | "rising" | "excited",
-"material": "M1" | null}}, ...]}} — the phrases in order; "material" names the item a phrase says, if any."""
+ANSWER = """Answer with JSON only: {"script": [{"frame": 3, "say": "...", "energy": "calm" | "lively" | "rising" | "excited",
+"material": "M1" | null, "fact": "K1" | null}, ...]} — the phrases in order; "material" names the item a phrase
+says, "fact" the fact from what you know before the match it tells, if any."""
 
 
 @dataclass
@@ -588,72 +607,128 @@ class Phrase:
     text: str
     energy: str                             # one of ENERGIES
     item: Item | None                       # the material it says, if any
+    fact: str | None = None                 # the id of the pre-match fact it tells, if any
 
 
 class Commentator:
-    def __init__(self, config: Mapping[str, Any], generate: Callable[[Sequence[str | bytes]], Any]):
+    def __init__(self, config: Mapping[str, Any], generate: Callable[[Sequence[str | bytes]], Any],
+                 players: Sequence[Mapping[str, Any]], knowledge: Mapping[str, str], lineups: str):
         # `config` is the `commentary` section; `generate(parts)` is one JSON-answer model call
-        # returning an object with .text, .latency and .call_id (matchlive.common.api.APIClient).
+        # returning an object with .text, .latency and .call_id (matchlive.common.api.APIClient);
+        # `players` is the roster (Match.prematch["players"]), whose names a phrase may say only
+        # when the pictures, the material or the fact it tells give them; `knowledge` is the
+        # pre-match knowledge base, fact id -> fact (CommentaryPolicy.knowledge), of which a
+        # stretch is shown the facts not told yet; `lineups` the starting line-ups
+        # (CommentaryPolicy.lineups).
         self.cfg = config
         self.generate = generate
+        self.players = players
+        self.knowledge = knowledge
+        self.lineups = lineups
 
-    def script(self, items: Sequence[Item], frames: Any, where: str, history: Sequence[str]
-               ) -> tuple[list[Phrase], float, str]:
+    def script(self, half: int, items: Sequence[Item], frames: Any, where: str, history: Sequence[tuple[float, str]],
+               before: Sequence[tuple[float, float, str, Sequence[Item]]],
+               told: Mapping[str, Time]) -> tuple[list[Phrase], float, str]:
         """(the phrases in time order, the call's latency in s, its call id). `frames` are the
-        stretch's pictures: an object with .text (who is who), .images (JPEGs) and .seconds (the
-        video second of each); `where` is the time and score as the stretch begins."""
+        stretch's pictures of `half`: an object with .text (who is who), .images (JPEGs) and .seconds (the
+        video second of each); `where` is the time and score as the stretch begins; `history` is
+        what was said, as (video second it began, text); `before` are the stretches just before
+        this one whose scripts are still being written, as (start, end, their pictures' text,
+        their material) — a script takes longer than a stretch lasts, so without them a stretch
+        would not know what the seconds before it are about; `told` are the pre-match facts already
+        told (or given to a stretch still being written), fact id -> when: left out of the
+        knowledge base it is shown, with when the last one was told, so it can space them."""
         seconds = frames.seconds
         label = {f"M{i + 1}": item for i, item in enumerate(items)}
 
         def frame(t):                       # the frame nearest a video time (1-based)
             return min(range(len(seconds)), key=lambda k: abs(seconds[k] - t[1])) + 1
 
-        must = "\n".join(f"- {k}, at frame {frame(it.at)} ({it.kind}): {' '.join(it.facts)} How: {it.rule}"
-                         for k, it in label.items() if it.must) or "(none)"
-        may = "\n".join(f"- {k} ({it.kind}): {' '.join(it.facts)} How: {it.rule}"
-                        for k, it in label.items() if not it.must) or "(none)"
-        recent = "\n".join(f"- {h}" for h in history[-self.cfg["history"]:]) or "(none yet)"
+        # A confirmation is about a moment already past: it has no frame of its own, and waits for a pause.
+        must = "\n".join(f"- {k}, " + ("at a pause in these seconds" if it.kind == "confirmation" else f"at frame {frame(it.at)}")
+                         + f" ({it.kind}): {' '.join(it.facts)} How: {it.rule}"
+                         for k, it in label.items()) or "(none)"
+        knowledge = {k: f for k, f in self.knowledge.items() if k not in told}
+        last = max(told.values(), default=None)
+        at = CommentaryPolicy._clock
+        recent = "\n".join(f"- {at(half, t)} {text}" for t, text in history[-self.cfg["history"]:]) or "(none yet)"
+        earlier = "\n".join(f"- {at(half, a)}-{clock(b)}: on the ball {_on_ball(text) or '(not seen)'}"
+                            + (f"; given to say: {' '.join(f for it in its for f in it.facts)}" if its else "")
+                            for a, b, text, its in before) or "(nothing)"
         step = seconds[1] - seconds[0] if len(seconds) > 1 else 0.5
+        # How much speech the stretch holds: `room` of its time, in phrases of the broadcast's
+        # length, each taking `phrase_time` (a + b * words) plus the gap after it.
+        (base, word), n = self.cfg["phrase_time"], self.cfg["phrase_words"]
+        phrases = len(seconds) * step * self.cfg["room"] / (base + n * word + self.cfg["gap"])
         prompt = PROMPT.format(language=self.cfg["language"], span=len(seconds) * step, step=step,
-                               max_words=self.cfg["max_words"], where=where, history=recent, must=must, may=may)
+                               base=base, word=word, four=(base + 4 * word + self.cfg["gap"]) / step,
+                               phrases=phrases, room=phrases * n, max_words=self.cfg["max_words"],
+                               lineups=self.lineups,
+                               knowledge="\n".join(f"- {k} {f}" for k, f in knowledge.items()) or "(nothing)",
+                               last=f"; the last one was told at {at(*last)}" if last else "; none yet",
+                               where=where, history=recent, before=earlier, must=must)
         parts = [prompt, frames.text]
         for k, (s, jpg) in enumerate(zip(seconds, frames.images), start=1):
-            parts += [f"Frame {k} ({clock(s)})", jpg]
+            parts += [f"Frame {k} ({at(half, s)})", jpg]
+        parts.append(ANSWER)
         result = self.generate(parts)
-        script = _script(parse_json(result.text), seconds, label)
-        latency = result.latency
-        said = " ".join(p.text for p in script)
-        if BACKGROUND.search(said) and not any("background" in f.lower() for it in items for f in it.facts):
-            # Background of the model's own (a record, a career, a season): it may be wrong, or give
-            # away what happens later. Asked once more, told what to leave out.
-            again = self.generate([*parts, f'Your script said: "{said}". It uses background that neither the pictures nor '
-                                           "the material give (records, careers, seasons, clubs' history). Write it again "
-                                           "without it."])
-            latency += again.latency
-            script = _script(parse_json(again.text), seconds, label) or script
-        return script, latency, result.call_id
+        script = _script(parse_json(result.text), seconds, label, knowledge)
+        # Names only from the pictures' who-is-who (a goalkeeper it marks is his side's starting
+        # keeper), the material, the match record and the fact a phrase tells; never a track label ("P3").
+        given = _named("\n".join([frames.text, where] + [f for it in items for f in it.facts]), self.players)
+        given |= {p["hash"] for p in self.players if p["starting"] and p["position"] == "goalkeeper"
+                  and re.search(rf"^P\d+: [^;\n]*\({p['team_side']}\), goalkeeper", frames.text, re.M)}
+        kept = []
+        for p in script:
+            about = _named(self.knowledge[p.fact], self.players) if p.fact else set()
+            if not _named(p.text, self.players) <= given | about or re.search(r"\bP\d+\b", p.text):
+                print(f"{at(half, p.at)} names what it was not given: dropped {p.text!r}", flush=True)
+                continue
+            kept.append(p)
+        return kept, result.latency, result.call_id
 
 
-def _script(answer: Mapping[str, Any], seconds: Sequence[float], label: Mapping[str, Item]) -> list[Phrase]:
+def _script(answer: Mapping[str, Any], seconds: Sequence[float], label: Mapping[str, Item],
+            knowledge: Mapping[str, str]) -> list[Phrase]:
     """The model's script -> phrases in time order; a phrase with no text or an unknown frame is
-    dropped, an unknown energy is "lively", an unknown material item is none."""
+    dropped, an unknown energy is "lively", an unknown material item or fact is none. An answer
+    with no script raises (the stretch is lost, and logged so)."""
     out = []
-    phrases = answer.get("script")
-    for p in phrases if isinstance(phrases, list) else []:
-        if not isinstance(p, dict):
-            continue
+    for p in answer["script"]:
         text, k = str(p.get("say") or "").strip(), p.get("frame")
         if not text or not isinstance(k, int) or not 1 <= k <= len(seconds):
             continue
         energy = p.get("energy") if p.get("energy") in ENERGIES else "lively"
-        out.append(Phrase(seconds[k - 1], text, energy, label.get(p.get("material"))))
+        fact = p.get("fact") if p.get("fact") in knowledge else None
+        out.append(Phrase(seconds[k - 1], text, energy, label.get(p.get("material")), fact))
     return sorted(out, key=lambda p: p.at)
 
 
-# Phrases that only background knowledge could supply: a player's record or career, a club's season or history.
-BACKGROUND = re.compile(r"\b(first|second|third|\d+(st|nd|rd|th))\b[^.!?]{0,30}\b(goal|appearance|start)s?\b[^.!?]{0,30}"
-                        r"\b(for|in|since|of)\b|\bfor the club\b|\bthis season\b|\blast season\b|\bcareer\b|"
-                        r"\bsince (he|joining|arriving|signing)\b|\bin (his|their) (time|history)\b", re.I)
+def _on_ball(pictures: str) -> str:
+    """Who had the ball over a stretch, from its pictures' text: the player with the ball at his
+    feet frame by frame, by name where the who-is-who has one, else by team ("Milner, Liverpool,
+    Costa"), repeats merged."""
+    who = {}
+    for line in pictures.splitlines():
+        m = re.match(r"(P\d+): ([^;]+)", line)
+        if m and "team unknown" not in m[2]:
+            # "Liverpool (away), #7 Milner" -> "Milner"; "Chelsea (home)" -> "Chelsea"
+            who[m[1]] = m[2].split("#", 1)[1].split(" ", 1)[1] if "#" in m[2] else m[2].split(" (")[0]
+    ball = next((line for line in pictures.splitlines() if line.startswith("Ball at a player's feet")), "")
+    seq = [who[p] for p in re.findall(r"\d+:(P\d+)", ball) if p in who]
+    return ", ".join(n for i, n in enumerate(seq) if i == 0 or n != seq[i - 1])
+
+
+def _named(text: str, players: Sequence[Mapping[str, Any]]) -> set[str]:
+    """The roster players (their hashes) `text` names, by full or short name, accents and case aside
+    ("Mané" is Mane)."""
+    text = _fold(text)
+    return {p["hash"] for p in players
+            if any(re.search(r"\b" + re.escape(_fold(n)) + r"\b", text) for n in (p["long_name"], p["short_name"]))}
+
+
+def _fold(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).casefold()
 
 
 def speaking_time(text: str, words_per_second: float) -> float:

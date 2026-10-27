@@ -19,10 +19,14 @@ A verdict is a set of writes, each citing the evidence the arbiter's tools retur
                                            observation the verdict rejects: that is a correction.
                                            An added event whose participants are all named (a
                                            player, or a track the verdict identifies) replaces the
-                                           entry it matches, whose observations are rejected: it
-                                           says who took part, which that entry may not.
+                                           entry it matches, whose own observations are rejected:
+                                           it says who took part, which that entry may not (an
+                                           entry an earlier verdict holds up is supported instead).
+  An identity written or supported is the only one standing on its track: the observations of
+  every other claim on that track are rejected.
   An observation may be rejected if memory cites it or it belongs to the case (its members
-  and evidence, e.g. the number reads of an off_roster_read case).
+  and evidence, e.g. the number reads of an off_roster_read case); an entry id is no
+  observation.
   identity  {"track": [half, shot, track], "player": hash}
                                            who a track is
 An empty list dismisses the case. Every write rests on the observation "verdict:<case id>",
@@ -61,7 +65,8 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
     # Observations a verdict may reject: those memory cites, and the case's own (e.g. the
     # off-pitch number reads an off_roster_read case is made of).
     case = mem.cases[case_id]
-    cited = {j.obs_id for js in mem.justifications.values() for _, j in js} | set(case.members) | set(case.evidence)
+    cited = {j.obs_id for js in mem.justifications.values() for _, j in js} \
+        | {m for m in (*case.members, *case.evidence) if m not in mem.entries}
     confirmed_tracks = defaultdict(list)
     for eid, e in mem.entries.items():
         if isinstance(e, Identity) and mem.status(eid) == "confirmed":
@@ -88,6 +93,9 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
             if a.get("entry") not in mem.entries:
                 return f"support: unknown entry {a.get('entry')!r}"
             writes.append(("support", (a["entry"], ())))
+            e = mem.entries[a["entry"]]
+            if isinstance(e, Identity):
+                writes += others_on_track(mem, e.track_key, e.player_id)
         elif op == "reject":
             if a.get("observation") not in cited:
                 return f"reject: unknown observation {a.get('observation')!r}"
@@ -118,11 +126,16 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
             # part, it replaces the matching entry instead: that entry's observations are
             # rejected, since the verdict's account of the same event is the fuller one (e.g. a
             # substitution seen with neither player identified, which cannot change the lineup).
+            # An entry an earlier verdict holds up is not replaced (the verdict's own writes stand).
+            # The observations rejected are the entry's own sightings: what stands on them (a
+            # paired partner's sighting, a re-check) falls with them, and the partner's own
+            # sighting stays — a foul is not retracted with the free kick it paired with.
             same = matching(outside, event)
-            if same and parts and all(p.player_id or p.track_key in named_tracks for p in parts):
-                writes += [("reject", j.obs_id) for _, j in mem.justifications[same[0]]
-                           if j.kind != "verdict" and mem.holds(j)]
+            if same and parts and all(p.player_id or p.track_key in named_tracks for p in parts) \
+                    and not any(j.kind == "verdict" and mem.holds(j) for _, j in mem.justifications[same[0]]):
+                writes += [("reject", j.obs_id) for _, j in mem.justifications[same[0]] if mem.holds(j) and j.of is None]
                 writes.append(("add_event", event))
+                outside = [(eid, e) for eid, e in outside if eid != same[0]]
             else:
                 # Supporting an entry, the verdict's participants join it like any agreeing claim's.
                 writes.append(("support", (same[0], parts)) if same else ("add_event", event))
@@ -137,6 +150,7 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
             if any(other != key and cooccur(key, other) for other in confirmed_tracks.get(player, [])):
                 return "identity: player already on another track in the same frame"
             writes.append(("identity", Identity(key, player)))
+            writes += others_on_track(mem, key, player)
         else:
             return f"unknown op {op!r}"
 
@@ -151,6 +165,14 @@ def apply_verdict(mem: MatchMemory, t_known: Time, case_id: str, verdict: Mappin
             mem.add_entry(t_known, x, Justification(obs, "verdict", True))
     mem.close_case(t_known, case_id, {"summary": verdict.get("summary", ""), "actions": actions})
     return None
+
+
+def others_on_track(mem: MatchMemory, key: tuple, player: str) -> list[tuple[str, str]]:
+    """The rejections that leave `player` the only identity standing on track `key`: one track is
+    one player, so the observations behind every other claim on it are wrong."""
+    return [("reject", j.obs_id) for eid, e in mem.entries.items()
+            if isinstance(e, Identity) and e.track_key == key and e.player_id != player
+            for _, j in mem.justifications[eid] if mem.holds(j)]
 
 
 def reject_newest(mem: MatchMemory, t_known: Time, case_id: str) -> None:
