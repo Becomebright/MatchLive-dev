@@ -11,12 +11,12 @@ relative to the repo root; see `CLAUDE.md` for the repo layout and day-to-day co
   (Settings → Access Tokens) for `hf auth login` (§3).
 - **Platform.** Linux x86_64 with conda. The environment below pins CUDA 13 builds (torch `cu130`,
   TensorRT), which do not install on macOS or Windows.
-  - Replaying the recorded streaming-QA runs from the shared caches (README) loads no model and
+  - Replaying the recorded QA and commentary from the shared caches (README) loads no model and
     needs no GPU.
   - Running perception (`scripts/run_perception.py`, SETUP §6) needs an NVIDIA GPU whose driver
     supports CUDA 13.
-- **Disk.** About 7 GB for all assets (videos 5.3 GB, models 0.7 GB, caches 0.85 GB), plus
-  ~30 MB of outputs per replayed match. The full download took about 9 minutes on a cloud VM.
+- **Disk.** About 5.1 GB for the assets (videos 3.5 GB, models 0.6 GB, caches 1.2 GB) and 1.5 GB
+  more once the cache archives are unpacked, plus ~30 MB of outputs per replayed match.
 - **API key.** Only for new model calls (a run from scratch, a changed setting): an
   OpenAI-compatible endpoint and key in `configs/api.local.yaml` (§2). Replays need none.
 
@@ -111,44 +111,47 @@ pip install --no-deps demucs==4.0.1 julius einops openunmix lameenc dora-search 
 
 ## 3. Model weights, match data and caches (private)
 
-All three live in one private Hugging Face dataset repo, `Becomebright/MatchLive-assets`, laid out
-like the repo root, so a single download drops every file in place:
+All three live in one private Hugging Face dataset repo, `Becomebright/MatchLive-assets`. Its folder
+**`v2026-10-27/`** holds everything the current code runs on and nothing else, laid out like the repo
+root (the repo's own README describes every file; the top-level folders there are older snapshots).
+Download it next to the clone and link it in:
 ```bash
 hf auth login                 # a token with read access to the repo
-hf download Becomebright/MatchLive-assets --repo-type dataset --local-dir . \
-    --include "dataset/*" --include "checkpoints/*" --include "cache/*"
-tar -xzf cache/api.tar.gz -C cache    # -> cache/api/<call id>.json
+hf download Becomebright/MatchLive-assets --repo-type dataset --include "v2026-10-27/*" --local-dir MatchLive-assets
+cd MatchLive
+cp -rl ../MatchLive-assets/v2026-10-27/. .     # hard links (plain cp -r across disks)
+tar -xzf cache/api.tar.gz -C cache             # -> cache/api/<call id>.json
+tar -xf cache/tts.tar -C cache                 # -> cache/tts/<call id>.mp3
 ```
-The caches make the results reproducible without a GPU or an API key (README, "Streaming QA"):
-the raw perception cache replaces a GPU pass over each half, and the API cache holds every
-model answer the recorded runs received. Leave `cache/*` out to start from scratch.
-One pattern per `--include` (a second bare pattern is read as a filename). `--include` skips the
-HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
-`.cache/huggingface/` (gitignored).
+The caches make the results reproducible without a GPU, an API key or a model server (README,
+"Reproduce"): the raw perception cache replaces a GPU pass over each half, the API cache holds
+every model answer the recorded runs received, and the speech cache every phrase voiced. Leave
+`cache/` out to start from scratch.
 
 | Path | Size | Used by |
 |---|---|---|
-| `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (3 matches) | 5.3G | every pipeline run (`paths.dataset`) |
-| `dataset/organized_data/.../2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-caption_with_gt.json` | 58K | ground-truth events (SoccerNet-Caption format, `gt_gameTime` = corrected time) |
-| `dataset/organized_data/.../<match>/kb.json` (2 benchmark matches) | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
-| `dataset/streamingqa/part1/` | 364K | streaming-QA benchmark: `benchmark-0926.jsonl` and the 0929 version (per-match files) |
+| `dataset/organized_data/england_epl/<season>/<match>/{1,2}_720p.mkv`, `metadata.json` (the 2 benchmark matches) | 3.5G | every pipeline run (`paths.dataset`) |
+| `dataset/organized_data/.../<match>/kb.json` | 86K | pre-match background for the commentary (`DESIGN.md` §6.8), built by `scripts/build_kb.py` from Wikipedia revisions before kick-off and football-data.co.uk results |
+| `dataset/organized_data/.../<match>/Labels-v2.json`, `Labels-caption.json` | 0.3M | SoccerNet labels (§4), evaluation only |
 | `dataset/streamingqa/part1_1001/` | 224K | streaming-QA benchmark, 1001 version (per-match files; `scripts/run_qa.py --benchmark`) |
 | `checkpoints/rfdetr-2xl-1019.onnx` | 470M | detector (`perception.detection.model`), the retrained RF-DETR-2XL (`docs/results.md` §31) |
-| `checkpoints/rfdetr-l.onnx` | 122M | the previous detector: the recorded runs and the shared perception caches were made with it (replay with `--set perception.detection.model=rfdetr-l.onnx perception.detection.trt_cache=trt/rfdetr-l_fp16`, one `--set` each) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches_gsr.onnx` | 112M | jersey reader (`perception.jersey.model`), retrained on 20 matches + SoccerNet-GSR (`docs/results.md` §30) |
-| `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | the previous jersey reader: the recorded runs and the shared perception caches were made with it, so replaying them needs `--set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx` (README) |
 | `checkpoints/tts/fenrir_{calm,lively,rising,excited}.{wav,txt}` | 2.9M | reference recordings the commentary's voice (drama-3) clones, one per energy, with their transcripts (`commentary.voice.tones`; made with gemini-3.8-flash-tts, `docs/results.md` §36) |
-| `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
-| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 320M | raw perception cache (`matchlive/common/cache.py`, format 5: each jersey read keeps its top number and that number's probability, not all 101; 2026-10-26), written by `scripts/run_perception.py`, read by every later stage |
-| `cache/api.tar.gz` → `cache/api/<call id>.json` | 2.3M (14M unpacked) | cached model answers: event analyzer, arbiter and QA calls of the recorded runs (and of other experiments). An archive because a Hugging Face folder holds at most 10,000 files; the `cache/api/` folder in the HF repo is an older subset of it. After new runs, re-pack with `tar -czf api.tar.gz --exclude='*.tmp' -C cache api` and upload it as `cache/api.tar.gz` |
+| `cache/perception/<match>/half{1,2}_all_<key>.npz` | 120M | raw perception cache under the default config (`matchlive/common/cache.py`, format 5), written by `scripts/run_perception.py`, read by every later stage |
+| `cache/api.tar.gz` → `cache/api/<call id>.json` | 7M (241M unpacked) | cached model answers: event analyzer, arbiter, QA and commentary scripts of the recorded runs (and of other experiments) |
+| `cache/tts.tar` → `cache/tts/<call id>.mp3` | 1.1G | cached speech of the commentary |
+| `outputs/live/<match>/full_2xl_window_v5/` | 10M each | the reference memory the QA and the commentary read (`docs/results.md` §43) |
+
+The two caches are archives because a Hugging Face folder holds at most 10,000 files. After new
+runs, re-pack them (`tar -czf api.tar.gz --exclude='*.tmp' -C cache api`, `tar -cf tts.tar
+--exclude='*.tmp' -C cache tts`) and upload the current set as a new dated folder, with the HF repo's
+README updated to match.
 
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
-change to any of them makes the pipeline look for a new file. The shared perception caches cover the
-default config (`rfdetr-2xl-1019` and the `_gsr` model) for Liverpool and Manchester United, and the
-previous detector and jersey ONNX for all three matches (the overrides above replay the older recorded
-runs). `cache/trt/` (TensorRT engines, in a folder per model file content) is specific to the GPU
-and is never shared.
+change to any of them makes the pipeline look for a new file. `cache/trt/` (TensorRT engines, in a
+folder per model file content) is specific to the GPU and is never shared; `cache/ambience/` (the
+broadcast's crowd sound, `scripts/render_stream.py`) is made on first use.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
 elsewhere:
@@ -170,13 +173,12 @@ so the repo stays private.
 `eval_memory.py`, `inject_errors.py`, `eval_commentary.py`) reads each match's SoccerNet labels
 from its folder: `Labels-v2.json` (action spotting: every goal, card, substitution, shot, corner,
 foul, offside, free kick, with team and time) and `Labels-caption.json` (commentary naming the
-players). They come from the `SoccerNet/SN-Labels` dataset repo on Hugging Face (accept its terms
-on the website first), laid out as league/season/game, so they drop straight into place:
+players). Those of the two benchmark matches come with §3. They are from the `SoccerNet/SN-Labels`
+dataset repo on Hugging Face (accept its terms on the website first), laid out as
+league/season/game, so another match's labels drop straight into place:
 ```bash
 hf download SoccerNet/SN-Labels --repo-type dataset --local-dir dataset/organized_data \
-    --include "england_epl/2015-2016/2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United/Labels-*.json" \
-    --include "england_epl/2016-2017/2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool/Labels-*.json" \
-    --include "england_epl/2015-2016/2015-08-16 - 18-00 Manchester City 3 - 0 Chelsea/Labels-*.json"
+    --include "england_epl/<season>/<match>/Labels-*.json"
 ```
 The live system never reads them (`DESIGN.md` §6.8).
 
@@ -195,8 +197,9 @@ is not installed.
 ## 5. Optional: v2 reference implementation
 
 `scripts/compare_v2.py` imports v2 from `paths.v2` (`../live-comment-v2`); clone it next to this
-repo if needed. It also needs the jersey torch checkpoint (see §3), so it runs only on the
-development machine as things stand.
+repo if needed. It also needs v2's detector `checkpoints/rfdetr-2xl.onnx` (in the HF repo's
+top-level `checkpoints/`, not in `v2026-10-27/`) and the jersey torch checkpoint (see §3), so it
+runs only on the development machine as things stand.
 
 ## 6. First run
 

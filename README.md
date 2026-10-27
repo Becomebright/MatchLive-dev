@@ -31,40 +31,37 @@ substitutions at the final whistle).
 
 ### Reproduce the reported results from the caches
 
-The reference run is `full_2xl_window` (`docs/results.md` §33): the RF-DETR-2XL detector, the jersey
-reader retrained with SoccerNet-GSR, and identity resolved per window (`DESIGN.md` §6.1 (f)). With
-the raw perception cache of both halves and `cache/api/` in place, it replays exactly: no GPU work and
-no API key, every model answer comes from the cache. If anything diverged, a request would miss the
-cache and the run would stop with `NoAPIKey`.
-
-**Today this works only on the development machine**: the perception caches and `cache/api.tar.gz` in
-the Hugging Face repo are still those of the earlier runs, which do not match the current default
-config (`docs/SETUP.md` §3). Elsewhere, perceive on a GPU first (below) and expect API calls, not a replay,
-until the new caches are uploaded.
+The reference memory is `full_2xl_window_v5` (`docs/results.md` §43): the events of the
+`full_2xl_window` run (§33: the RF-DETR-2XL detector, the jersey reader retrained with SoccerNet-GSR,
+identity resolved per window, gemini-3.8-flash), its per-frame identities brought to the current
+format without a model call. The QA and the commentary read it with Qwen3.8-Flash-Next. With the
+assets of `docs/SETUP.md` §3 in place, both replay exactly: no GPU, no API key, no model server,
+every model answer and every voiced phrase comes from the caches. If anything diverged, a request
+would miss the cache and the run would stop with `NoAPIKey`.
 
 ```bash
 conda activate matchlive
-pytest tests/                               # 64 tests
+pytest tests/                               # 80 tests
 M="2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool"
-python scripts/run_live.py --match "$M" --name full_2xl_window    # ~3 min replaying from the caches
-python scripts/eval_live.py --match "$M" --run full_2xl_window    # 221 windows, 29 cases, score in memory 1-2
-python scripts/run_qa.py --match "$M" --run full_2xl_window --mode tools \
-    --benchmark dataset/streamingqa/part1_1001 --tag 1001         # ~2 min: 0.876
+python scripts/eval_live.py --match "$M" --run full_2xl_window_v5     # the memory: windows, cases, score
+python scripts/run_qa.py --match "$M" --run full_2xl_window_v5 --mode tools \
+    --benchmark dataset/streamingqa/part1_1001 --tag 1001             # 0.749
+python scripts/run_commentary.py --match "$M" --run full_2xl_window_v5 --name fn_r11_full
 ```
-The other match is `"2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United"`. Accuracy of the reference run
-(`tools` mode, benchmark 1001, gemini-3.8-flash; single runs, about ±1 point of noise):
+The other match is `"2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United"`. QA accuracy (`tools` mode,
+benchmark 1001; single runs, about ±1 point of noise):
 
-| Match | Questions | tools (MatchLive) |
-|---|---|---|
-| Chelsea – Liverpool | 347 | 0.876 |
-| Chelsea – Manchester United | 353 | 0.881 |
-| Both | 700 | 0.879 |
+| Match | Questions | Flash-Next QA on `full_2xl_window_v5` | gemini-3.8-flash QA on `full_2xl_window` (code of 2026-10-20) |
+|---|---|---|---|
+| Chelsea – Liverpool | 347 | 0.749 | 0.876 |
+| Chelsea – Manchester United | 353 | 0.728 | 0.881 |
+| Both | 700 | 0.739 | 0.879 |
 
-The runs before 2026-10-19 (RF-DETR-L, the previous jersey reader, per-frame identity) scored 0.879,
-0.861 and 0.870 on the same questions. They are kept in `outputs/` but no longer replay: the detector,
-the jersey reader and the identity resolution all changed what the analyzer is shown, so its requests
-differ from the cached ones. The `blind` and `dump_log` baselines were last run on the 0926 benchmark
-(`docs/results.md` §14–§16).
+The gemini column no longer replays: the QA now runs on Flash-Next (`qa.api`), and its tools changed
+on 2026-10-26. Neither does `scripts/run_live.py` replay `full_2xl_window` under the current code: what
+the event analyzer is shown changed on 2026-10-26, so its requests miss the cache and go to
+gemini-3.8-flash (`configs/api.local.yaml`; the perception cache still spares the GPU). The `blind`
+and `dump_log` baselines were last run on the 0926 benchmark (`docs/results.md` §14–§16).
 
 `run_qa.py --half 1` or `--limit N` answer a subset, written to its own file.
 
