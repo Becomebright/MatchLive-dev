@@ -8,9 +8,13 @@ Input: a half video and the commentary of a live run on it (scripts/run_commenta
 outputs/stream/<match>/<run>/: half<h>[_<start>-<end>].mp4 — or with --hls, an HLS stream of the same
 (<name>/index.m3u8 and 6-s segments, playable by any HLS player). It is what a viewer of the live
 broadcast would get with the system in the loop: the output runs `commentary.output_delay` s behind
-the feed, so it is laid out on the video's own timeline, each line on air from its scheduled time
-(runtime.runner.run_commentary) for as long as its audio lasts. The broadcast's sound (its own commentary
-and the crowd) stays underneath at `render.background_volume`.
+the feed, so it is laid out on the video's own timeline, each phrase on air from its scheduled time
+(runtime.runner.run_commentary) for as long as its audio lasts (its subtitle a little longer, until the
+next one). Underneath is the broadcast's own sound: with `render.ambience`, its commentators taken out by
+source separation (htdemucs: everything but the "vocals" stem), so the crowd and the pitch stay at
+their own level (`render.ambience_volume`) as under a live commentator; otherwise all of it, its
+commentators included, at `render.background_volume`. The separated sound of a half is computed once
+and cached (paths.cache/ambience/<match>/half<h>.flac).
 """
 
 from __future__ import annotations
@@ -28,6 +32,39 @@ from matchlive.common.config import load_config, run_overrides
 from matchlive.common.match import Match
 
 RATE = 48000              # Hz, stereo float: the commentary track is built at the broadcast's audio rate
+
+
+def ambience(video: Path, out: Path) -> Path:
+    """The broadcast's sound without its commentators, as a FLAC at `out` (computed once): htdemucs
+    separates it into drums, bass, other and vocals; the commentary is in the vocals, so the rest
+    is kept."""
+    if out.exists():
+        return out
+    import sys
+    import types
+
+    import torch
+    # Demucs and openunmix import torchaudio for audio file I/O, which is not used here (ffmpeg
+    # reads and writes the audio) and has no build for this torch: an empty module stands in.
+    sys.modules.setdefault("torchaudio", types.ModuleType("torchaudio"))
+    import demucs.apply
+    import demucs.pretrained
+
+    model = demucs.pretrained.get_model("htdemucs").eval()
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vn", "-f", "f32le", "-ac", "2",
+                          "-ar", str(model.samplerate), "-"], capture_output=True, check=True).stdout
+    wav = torch.from_numpy(np.frombuffer(pcm, dtype=np.float32).reshape(-1, 2).T.copy())
+    # Normalised as demucs' own separate.py does, and scaled back after.
+    mean, std = wav.mean(0).mean(), wav.mean(0).std()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        stems = demucs.apply.apply_model(model.to(device), ((wav - mean) / std)[None], device=device,
+                                         split=True, overlap=0.25)[0]
+    rest = (stems.sum(0) - stems[model.sources.index("vocals")]) * std
+    out.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "f32le", "-ar", str(model.samplerate), "-ac", "2", "-i", "-",
+                    "-ar", str(RATE), str(out)], input=rest.T.contiguous().cpu().numpy().tobytes(), check=True)
+    return out
 
 
 def ass(lines: list[dict], start: float, font_size: int, delay: float) -> str:
@@ -52,9 +89,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     end = max([l["show"][2] - start for l in lines] + [0.0]) + 3600
     events = [f"Dialogue: 0,{stamp(0)},{stamp(end)},Tag,,0,0,0,,MatchLive commentary \\N(live, {delay:.0f} s delay)"]
-    for line in lines:
+    for i, line in enumerate(lines):
         text = line["text"].replace("{", "(").replace("}", ")").replace("\n", " ")
-        events.append(f"Dialogue: 0,{stamp(line['show'][1] - start)},{stamp(line['show'][2] - start)},Line,,0,0,0,,{text}")
+        # A phrase stays up a second after it is said, unless the next one starts first.
+        until = line["show"][2] + 1.0
+        if i + 1 < len(lines):
+            until = max(line["show"][2], min(until, lines[i + 1]["show"][1]))
+        events.append(f"Dialogue: 0,{stamp(line['show'][1] - start)},{stamp(until - start)},Line,,0,0,0,,{text}")
     return head + "\n".join(events) + "\n"
 
 
@@ -105,15 +146,21 @@ def main():
     name = f"half{args.half}" + (f"_{int(start)}-{int(end)}" if (start, end) != (0.0, length) else "")
     out_dir = config["paths"]["outputs"] / "stream" / args.match / commentary
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The sound under ours: the crowd and the pitch only, or the broadcast's whole sound.
+    if render["ambience"]:
+        under = ambience(video, config["paths"]["cache"] / "ambience" / args.match / f"half{args.half}.flac")
+        under_input, volume = ["-ss", str(start), "-t", str(end - start), "-i", str(under)], render["ambience_volume"]
+    else:
+        under_input, volume = [], render["background_volume"]
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         (tmp / "subs.ass").write_text(ass(shown, start, render["font_size"], cfg["output_delay"]))
         voice_track(shown, start, end - start).tofile(tmp / "voice.f32")
         graph = (f"[0:v]ass={tmp / 'subs.ass'}[v];"
-                 f"[0:a]aresample={RATE},volume={render['background_volume']}[bg];"
+                 f"[{2 if under_input else 0}:a]aresample={RATE},volume={volume}[bg];"
                  f"[bg][1:a]amix=inputs=2:duration=first:normalize=0[a]")
         cmd = ["ffmpeg", "-v", "error", "-y", "-ss", str(start), "-t", str(end - start), "-i", str(video),
-               "-f", "f32le", "-ar", str(RATE), "-ac", "2", "-i", str(tmp / "voice.f32"),
+               "-f", "f32le", "-ar", str(RATE), "-ac", "2", "-i", str(tmp / "voice.f32"), *under_input,
                "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
                "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "aac", "-b:a", "160k"]
         if args.hls:
@@ -127,7 +174,7 @@ def main():
             cmd += ["-movflags", "+faststart", str(out)]
         subprocess.run(cmd, check=True)
     print(out)
-    print(f"{len(shown)} lines on air over {end - start:.0f} s ({sum(bool(l.get('audio')) for l in shown)} voiced)")
+    print(f"{len(shown)} phrases on air over {end - start:.0f} s ({sum(bool(l.get('audio')) for l in shown)} voiced)")
 
 
 if __name__ == "__main__":

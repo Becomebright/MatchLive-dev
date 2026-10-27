@@ -7,8 +7,9 @@ Replaying from the cache is what lets offline runs apply a result at "issue time
 measured latency" (DESIGN.md §6.10) reproducibly, and lets ablations share calls whose
 inputs are identical. The key does not depend on the endpoint: the same model answers the
 same request wherever it is reached, so answers cached before a change of endpoint stay valid.
-Text-to-speech for the commentary (speech()) goes through the same endpoints and is cached the
-same way, as MP3 files.
+Text-to-speech for the commentary (speech(), a voice-cloning model) is cached the same way, as MP3
+files; it goes through the same endpoints, or through its own (`api.speech_endpoint`, a voice model
+served locally).
 
 The endpoints (base URL and key each) are read from the local file named by `api.endpoint`
 (configs/api.local.yaml, gitignored: keys never go into the repo), in order: a failed request is
@@ -22,10 +23,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
+import subprocess
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -64,16 +68,23 @@ class APIClient:
         self.speech_dir = cache_dir / config.get("speech_cache", "tts")
         self._clients: list | None = None       # one SDK client per endpoint, in the local file's order
         self._out: set[int] = set()              # endpoints out of quota: no request goes to them again
+        self._speech: APIClient | None = None    # over api.speech_endpoint, made on the first speech request
         self._lock = threading.Lock()
 
-    def generate(self, parts: Sequence[str | bytes], json_output: bool = False) -> APIResult:
+    def generate(self, parts: Sequence[str | bytes], json_output: bool = False,
+                 reasoning: str | None = None) -> APIResult:
         """One generation over `parts` (str = text, bytes = a JPEG image); `json_output`
-        asks for a JSON answer."""
+        asks for a JSON answer; `reasoning` ("low", ...) sets the model's reasoning effort
+        (by default the model's own), for a caller that cannot wait for a long think."""
         model = self.config["model"]
         # Images enter the key by content hash, so the key stays small and identical
         # images always give the same key.
         request = {"model": model, "json": json_output,
                    "parts": [p if isinstance(p, str) else "jpeg:" + hashlib.sha256(p).hexdigest() for p in parts]}
+        if reasoning is not None:               # in the key only when set: earlier keys are unchanged
+            request["reasoning"] = reasoning
+        if self.config.get("extra_body"):       # server-specific fields, e.g. thinking off on a local vLLM
+            request["extra_body"] = self.config["extra_body"]
         call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
         path = self.cache_dir / f"{call_id}.json"
         if path.exists():
@@ -85,6 +96,10 @@ class APIClient:
                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode()}}
                    for p in parts]
         extra = {"response_format": {"type": "json_object"}} if json_output else {}
+        if reasoning is not None:
+            extra["reasoning_effort"] = reasoning
+        if self.config.get("extra_body"):
+            extra["extra_body"] = self.config["extra_body"]
 
         def call(client):
             resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": content}], **extra)
@@ -102,10 +117,18 @@ class APIClient:
         _write(path, json.dumps(d).encode())
         return APIResult(call_id, d["text"], d["model"], latency, cached=False)
 
-    def speech(self, text: str, voice: str, instructions: str, model: str) -> SpeechResult:
-        """`text` spoken by `voice` in the manner `instructions` describe (text-to-speech, MP3),
-        cached like generate() under the hash of the request, in paths.cache/<api.speech_cache>."""
-        request = {"model": model, "voice": voice, "instructions": instructions, "text": text, "format": "mp3"}
+    def speech(self, text: str, voice: str, reference: str, model: str) -> SpeechResult:
+        """`text` spoken by a voice-cloning model (fishaudio/drama-3) in the voice and delivery of a
+        reference recording (`reference`: <name>.wav under the repo root, its transcript in
+        <name>.txt), as MP3, cached like generate() under the hash of the request, in
+        paths.cache/<api.speech_cache>. The request goes to the endpoints of `api.speech_endpoint`
+        when it is set (a model served locally), else to the usual ones."""
+        ref = REPO_ROOT / reference
+        ref_audio, ref_text = ref.with_suffix(".wav").read_bytes(), ref.with_suffix(".txt").read_text().strip()
+        # The key as before the cloning model ("instructions" held the reference's name), so the
+        # cached audio stays valid; the recording by content too: a re-recorded one is a new request.
+        request = {"model": model, "voice": voice, "instructions": reference, "text": text, "format": "mp3",
+                   "reference": hashlib.sha256(ref_audio + ref_text.encode()).hexdigest()}
         call_id = hashlib.sha256(json.dumps(request).encode()).hexdigest()[:16]
         path = self.speech_dir / f"{call_id}.mp3"
         meta = path.with_suffix(".json")
@@ -113,13 +136,26 @@ class APIClient:
             return SpeechResult(call_id, path, json.loads(meta.read_text())["latency"], cached=True)
 
         def call(client):
-            audio = client.audio.speech.create(model=model, voice=voice, input=text, instructions=instructions,
-                                               response_format="mp3").read()
-            if not audio:
-                raise ValueError("empty audio")
-            return audio
+            wav = client.audio.speech.create(
+                model=model, voice=voice, input=text, response_format="wav",
+                extra_body={"ref_audio": "data:audio/wav;base64," + base64.b64encode(ref_audio).decode(),
+                            "ref_text": ref_text}).read()
+            with wave.open(io.BytesIO(wav)) as w:
+                seconds = w.getnframes() / w.getframerate()
+            # drama-3 now and then goes on generating silence up to its token limit (vLLM-Omni's
+            # recipe): speech far longer than the words need (about 0.4 s a word) is a failed take,
+            # and sampling differs from call to call, so a retry usually comes out right.
+            if seconds > 0.6 * len(text.split()) + 3:
+                raise ValueError(f"{seconds:.1f} s of audio for {len(text.split())} words")
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "mp3", "pipe:1"], input=wav,
+                                  capture_output=True, check=True).stdout
 
-        audio, latency, client = self._call(call)
+        with self._lock:
+            if self.config.get("speech_endpoint") and self._speech is None:
+                # The same client over the speech endpoints alone: a local TTS server must not take
+                # over the other calls when an endpoint fails, nor they its requests.
+                self._speech = APIClient({**self.config, "endpoint": self.config["speech_endpoint"]}, Path())
+        audio, latency, client = (self._speech or self)._call(call)
         _write(path, audio)
         _write(meta, json.dumps({"latency": latency, "model": model, "endpoint": str(client.base_url)}).encode())
         return SpeechResult(call_id, path, latency, cached=False)
@@ -148,14 +184,16 @@ class APIClient:
         in quota; a failed attempt (overload, timeout, an empty answer) is retried on the next one
         at once — for this request only. Once every endpoint has failed it in turn, it waits
         (backoff) before the next round. An endpoint out of quota is dropped for good, for every
-        request. Returns (what `call` returned, the successful attempt's latency — all a cached
-        replay has to go on — and the client that answered)."""
+        request. Returns (what `call` returned, its latency from the first attempt — failed attempts
+        and backoff included, as a live run would wait; all a cached replay has to go on — and the
+        client that answered)."""
         with self._lock:
             # The SDK clients, created once even when several threads call at the same time.
             if self._clients is None:
                 self._clients = self._connect()
         n = len(self._clients)
         step = 0
+        t0 = time.perf_counter()
         for attempt in range(self.config.get("max_attempts", 1)):
             with self._lock:
                 # The endpoints still in quota, in order (all of them if none is: nothing else to try).
@@ -163,7 +201,6 @@ class APIClient:
             current = live[step % len(live)]
             client = self._clients[current]
             try:
-                t0 = time.perf_counter()
                 out = call(client)
                 return out, time.perf_counter() - t0, client
             except Exception as e:  # noqa: BLE001 — any API failure is retried the same way

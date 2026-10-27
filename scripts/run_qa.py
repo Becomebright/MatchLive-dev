@@ -44,7 +44,7 @@ def main():
     ap.add_argument("--run", default="full", help="live run name (scripts/run_live.py --name)")
     ap.add_argument("--mode", default=None,
                     help="tools | dump_log (default: qa.mode) | blind | video | events (ablation baselines)")
-    ap.add_argument("--model", default=None, help="the QA model (api.model); appended to the result file's name")
+    ap.add_argument("--model", default=None, help="the QA model (qa.api.model); appended to the result file's name")
     ap.add_argument("--benchmark", default="dataset/streamingqa/part1/benchmark-0926.jsonl",
                     help="a JSONL of both matches' questions (with match_key), or a folder of per-match files named "
                          "after the match (a metadata row, then the questions)")
@@ -58,7 +58,7 @@ def main():
 
     run_dir = load_config()["paths"]["outputs"] / "live" / args.match / args.run
     # The run's own settings (e.g. loop.cascade off decides how memory is read).
-    config = load_config(overrides=run_overrides(run_dir) + ([f"api.model={args.model}"] if args.model else []))
+    config = load_config(overrides=run_overrides(run_dir) + ([f"qa.api.model={args.model}"] if args.model else []))
     mode = args.mode or config["qa"]["mode"]
     # The events baseline is the analyzer's output unchecked: every candidate its own entry.
     assert mode != "events" or not config["loop"]["consistency"], "--mode events reads a loop.consistency=false run"
@@ -73,7 +73,7 @@ def main():
     sources = {f"obs:{r['call_id']}#{i}": {"window": r["window"], "candidate": c}
                for r in map(json.loads, open(run_dir / "windows.jsonl")) for i, c in enumerate(r.get("candidates", []))}
     tools = QATools(config, match, mem, perceived, sources)
-    client = APIClient(config["api"], config["paths"]["cache"])
+    client = APIClient({**config["api"], **config["qa"]["api"]}, config["paths"]["cache"])
     agent = QAAgent(config["qa"], lambda parts: client.generate(parts, json_output=True))
 
     bench = REPO_ROOT / args.benchmark

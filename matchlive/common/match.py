@@ -44,7 +44,7 @@ def prematch(metadata: Mapping[str, Any], kb: Mapping[str, Any] | None = None) -
     """What is known before kick-off — the only match information the live system gets
     (DESIGN.md §6.8): the team names, kit colours, which goal each team defends in each half,
     and the two squads (name, shirt number, starting or substitute, and a starter's position
-    from the announced formation). Under "background", for the commentary: the formations,
+    from the announced formation: its line and its side of it). Under "background", for the commentary: the formations,
     venue, referee, round, date and nationalities from metadata.json, and the pre-match
     knowledge base `kb` (scripts/build_kb.py) — each side's manager, captain and facts (the
     table and form going in, signings, ...), and each player's facts. Everything else in
@@ -58,7 +58,8 @@ def prematch(metadata: Mapping[str, Any], kb: Mapping[str, Any] | None = None) -
     for p in metadata["players"]:
         players.append({k: p[k] for k in ("hash", "team_side", "name", "short_name", "long_name",
                                           "jersey_number", "starting")}
-                       | {"position": _position(metadata["tactics"][p["team_side"]], p["position"])})
+                       | {"position": _position(metadata["tactics"][p["team_side"]], p["position"]),
+                          "side": _side(metadata["tactics"][p["team_side"]], p["position"]), "slot": p["position"]})
     kb = kb or {"teams": {}, "players": {}}
     background = {
         "venue": metadata["venue"][0].split(" (")[0] if metadata.get("venue") else None,   # "Stamford Bridge"
@@ -79,6 +80,20 @@ def prematch(metadata: Mapping[str, Any], kb: Mapping[str, Any] | None = None) -
         "players": players,
         "background": background,
     }
+
+
+def _side(formation: str, slot: int | None) -> str | None:
+    """A starter's side of their line in the formation: "1-4-2-3-1" with slot 5 -> "left". Each
+    line's slots run from its right to its left (checked on both local matches' four line-ups:
+    slot 2 is the right-back, the last defender the left-back, the first of the attacking three
+    the right winger); a line of one is "centre", and the goalkeeper has none."""
+    if not slot:
+        return None
+    lines = [int(n) for n in formation.split("-")]
+    for i, n in enumerate(lines):
+        if slot <= n:
+            return None if i == 0 else "centre" if n == 1 else "right" if slot == 1 else "left" if slot == n else "centre"
+        slot -= n
 
 
 def _position(formation: str, slot: int | None) -> str | None:

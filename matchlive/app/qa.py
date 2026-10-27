@@ -54,7 +54,7 @@ Tools (at most {max_requests} requests per round):
 - why {{"entry": "E12"}}: what an event rests on (which analyses saw it, arbiter verdicts).
 - get_frames {{"half": 1, "start": 600, "end": 620}}: up to {max_frames} broadcast frames spread over a span before
   now; tracked players are labelled P1, P2, ... and the text says who each is, as far as shirt-number reading
-  knows by now, and who is nearest the ball.
+  knows by now, and who has the ball at his feet.
 - get_event_evidence {{"entry": "E12"}}: the same, for the seconds around an event.
 - get_current_view {{}}: the same, for the last {current_view} seconds up to now.
 

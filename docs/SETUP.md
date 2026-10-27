@@ -40,6 +40,12 @@ pip install -e . --no-deps    # makes `matchlive` importable from scripts/ and t
 pip install onnx              # only for scripts/export_jersey_onnx.py (torch -> ONNX export)
 pip install pyarrow datasets accelerate tensorboard   # only for retraining the jersey reader (§7)
 pip install pycocotools       # only for scripts/eval_detection_gsr.py (detection AP)
+# Only for scripts/render_stream.py: htdemucs takes the broadcast's commentators out of the sound
+# under ours. --no-deps keeps pip from pulling another torch; torchaudio (which has no build for
+# this torch) is not needed — render_stream.py reads and writes the audio with ffmpeg. The model
+# weights (80 MB) download to ~/.cache/torch/hub on first use.
+pip install --no-deps demucs==4.0.1 julius einops openunmix lameenc dora-search treetable submitit \
+    retrying omegaconf antlr4-python3-runtime==4.9.3 cloudpickle
 ```
 - **CUDA 13 everywhere:** PyPI `onnxruntime-gpu` 1.30 is a CUDA 13 build, so torch comes from the
   `cu130` index; both then share the pip `nvidia-*` CUDA/cuDNN wheels. Call
@@ -65,6 +71,43 @@ pip install pycocotools       # only for scripts/eval_detection_gsr.py (detectio
   (`NoAPIKey`) instead of calling the API, so a replay either reproduces the recorded run or fails
   loudly. (Runs up to 2026-09-29 called Gemini directly through `google-genai`; the cache is keyed
   by model and request, not by endpoint, so their answers replay the same.)
+- **Optional: an open model served locally** for a run's model calls, or the commentary's scripts
+  alone (`commentary.api`). vLLM pins its own torch, so it has a conda env of its own,
+  **`vllm-serve`** (Python 3.12):
+  ```bash
+  conda create -n vllm-serve -c conda-forge --override-channels python=3.12 pip
+  ~/miniconda3/envs/vllm-serve/bin/pip install uv
+  ~/miniconda3/envs/vllm-serve/bin/uv pip install --python ~/miniconda3/envs/vllm-serve/bin/python "vllm==0.32.0"
+  hf download Qwen/Qwen3.8-Flash-Next-FP8      # or Qwen/Qwen3.8-27B-FP8
+  PATH=~/miniconda3/envs/vllm-serve/bin:$PATH bash scripts/serve_llm.sh flashnext   # 4 GPUs | qwen27b: 1 GPU
+  ```
+  `scripts/serve_llm.sh` holds each model's flags (from the vLLM recipes, for H100 80GB). The
+  endpoint goes in `configs/vllm.local.yaml` (`endpoints: [{base_url: "http://localhost:8000/v1",
+  api_key: EMPTY}]`). A live run (and its QA, which reads the run's settings) picks the model with
+  `--set api.endpoint=configs/vllm.local.yaml --set api.model=Qwen/Qwen3.8-Flash-Next-FP8 --set
+  api.timeout=900 --set 'api.extra_body={reasoning_effort: medium}'` (Flash-Next thinks at `xhigh` by
+  default: ~6,800 tokens, 27 s an analyzer window; results §35); the commentary's scripts alone with
+  `--set 'commentary.api={endpoint: configs/vllm.local.yaml, model: Qwen/Qwen3.8-27B-FP8, extra_body:
+  {chat_template_kwargs: {enable_thinking: false}}}' --set commentary.reasoning=null`.
+- **The commentary's voice: fishaudio/drama-3, served locally** (`commentary.voice`,
+  `api.speech_endpoint`). vLLM-Omni pins its own vLLM and torch, so it has a conda env of its own,
+  **`drama3`** (Python 3.12). vLLM-Omni's main branch needs vLLM 0.32 (with the 0.31 of its recipe
+  the server fails to start on an import error):
+  ```bash
+  conda create -n drama3 -c conda-forge --override-channels python=3.12
+  ~/miniconda3/envs/drama3/bin/pip install uv
+  ~/miniconda3/envs/drama3/bin/uv pip install --python ~/miniconda3/envs/drama3/bin/python vllm==0.32.0 --torch-backend=auto
+  ~/miniconda3/envs/drama3/bin/uv pip install --python ~/miniconda3/envs/drama3/bin/python git+https://github.com/vllm-project/vllm-omni.git
+  hf download fishaudio/drama-3                                  # 39 GB
+  PATH=~/miniconda3/envs/drama3/bin:$PATH bash scripts/serve_tts.sh   # one GPU (CUDA_VISIBLE_DEVICES, default 4)
+  ```
+  The endpoint goes in `configs/tts.local.yaml` (`endpoints: [{base_url: "http://localhost:8091/v1",
+  api_key: EMPTY}]`). The reference recordings it clones are `checkpoints/tts/` (§3). Cached speech
+  (`cache/tts/`) replays without the server.
+- **The broadcast commentary's transcript with names** (evaluation only:
+  `scripts/transcribe_broadcast.py --names`, read by `scripts/compare_broadcast.py`) runs
+  Qwen/Qwen3-ASR-1.7B-hf and Qwen/Qwen3-ForcedAligner-0.6B-hf on one GPU in the `matchlive` env
+  (transformers ≥ 5.17 has both; no new package). Both download from the Hugging Face Hub on first use.
 
 ## 3. Model weights, match data and caches (private)
 
@@ -94,16 +137,18 @@ HF repo's own `.gitattributes`/`README.md`; the download also writes metadata to
 | `checkpoints/rfdetr-l.onnx` | 122M | the previous detector: the recorded runs and the shared perception caches were made with it (replay with `--set perception.detection.model=rfdetr-l.onnx perception.detection.trt_cache=trt/rfdetr-l_fp16`, one `--set` each) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches_gsr.onnx` | 112M | jersey reader (`perception.jersey.model`), retrained on 20 matches + SoccerNet-GSR (`docs/results.md` §30) |
 | `checkpoints/jersey_dinov3_convnext_tiny-20_matches.onnx` | 112M | the previous jersey reader: the recorded runs and the shared perception caches were made with it, so replaying them needs `--set perception.jersey.model=jersey_dinov3_convnext_tiny-20_matches.onnx` (README) |
+| `checkpoints/tts/fenrir_{calm,lively,rising,excited}.{wav,txt}` | 2.9M | reference recordings the commentary's voice (drama-3) clones, one per energy, with their transcripts (`commentary.voice.tones`; made with gemini-3.8-flash-tts, `docs/results.md` §36) |
 | `checkpoints/rfdetr-2xl.onnx` | 470M | v2 baseline detector in `scripts/compare_v2.py` |
-| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 830M | raw perception cache (`matchlive/common/cache.py`), written by `scripts/run_perception.py`, read by every later stage |
+| `cache/perception/<match>/half{1,2}_all_<key>.npz` (3 matches) | 320M | raw perception cache (`matchlive/common/cache.py`, format 5: each jersey read keeps its top number and that number's probability, not all 101; 2026-10-26), written by `scripts/run_perception.py`, read by every later stage |
 | `cache/api.tar.gz` → `cache/api/<call id>.json` | 2.3M (14M unpacked) | cached model answers: event analyzer, arbiter and QA calls of the recorded runs (and of other experiments). An archive because a Hugging Face folder holds at most 10,000 files; the `cache/api/` folder in the HF repo is an older subset of it. After new runs, re-pack with `tar -czf api.tar.gz --exclude='*.tmp' -C cache api` and upload it as `cache/api.tar.gz` |
 
 The perception cache file name carries a hash of its inputs (video, both ONNX models, perception
 settings), taken from file contents, so a download matches as long as those are unchanged; a
-change to any of them makes the pipeline look for a new file. The shared perception caches were
-written with the previous detector and jersey ONNX, so under the default config (`rfdetr-2xl-1019` and the `_gsr` model) they are not
-found and the first run perceives from scratch on a GPU; the overrides above (jersey and detector) keep them usable. `cache/trt/` (TensorRT engines) is
-specific to the GPU and is never shared.
+change to any of them makes the pipeline look for a new file. The shared perception caches cover the
+default config (`rfdetr-2xl-1019` and the `_gsr` model) for Liverpool and Manchester United, and the
+previous detector and jersey ONNX for all three matches (the overrides above replay the older recorded
+runs). `cache/trt/` (TensorRT engines, in a folder per model file content) is specific to the GPU
+and is never shared.
 
 Kept only on the development machine, not in the repo — the scripts that need them do not run
 elsewhere:

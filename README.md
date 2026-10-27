@@ -91,12 +91,13 @@ Two more steps turn a step-1 run into the broadcast with our commentary, subtitl
 
 | Step | Script | Writes |
 |---|---|---|
-| 3. Commentate: every 2 s of match time a policy reads memory as known then and picks what to say — a correction of something already said, a confirmation, the news, a recap — worded by status (a confirmed event names its player, a pending one only its team); a model says it as a commentator would, and a text-to-speech model voices it | `scripts/run_commentary.py --match "$M" [--run full]` | `outputs/commentary/<match>/<run>/`: `lines.jsonl` (text, tone, audio, when it is on air), subtitles per half |
-| 4. Render the delayed live output: the half video with the lines burned in and spoken over the broadcast's own sound (kept low) | `scripts/render_stream.py --match "$M" --half 1 [--start S --end E] [--hls]` | `outputs/stream/<match>/<run>/`: an MP4, or an HLS stream (`index.m3u8` + segments) |
+| 3. Commentate, 10 s of video at a time: a policy reads memory as known then and gives what must be said — a correction of something already said, a confirmation, the news — worded by status (a confirmed event names its player, a pending one only its team), and what may be said in a lull (how the match stands, pre-match background); a model writes the stretch as a script of short phrases over all its frames, each at the frame it is said at, with its energy, and a text-to-speech model voices each phrase | `scripts/run_commentary.py --match "$M" [--run full]` | `outputs/commentary/<match>/<run>/`: `lines.jsonl` (one record per phrase: text, energy, audio, the frame it was written for, when it is on air), subtitles per half |
+| 4. Render the delayed live output: the half video with the phrases burned in and spoken over the broadcast's crowd and pitch sound (its commentators taken out by source separation) | `scripts/render_stream.py --match "$M" --half 1 [--start S --end E] [--hls]` | `outputs/stream/<match>/<run>/`: an MP4, or an HLS stream (`index.m3u8` + segments) |
 
 The output runs `commentary.output_delay` (120 s) behind the feed, which absorbs the time memory
-needs to learn of an event and the two model calls behind each line (`DESIGN.md` §6.9 D3).
-Rendering needs an ffmpeg with libass (the conda-forge build of `docs/SETUP.md` §2 has it).
+needs to learn of an event, a stretch's length and its script (`DESIGN.md` §6.9 D3).
+Rendering needs an ffmpeg with libass (the conda-forge build of `docs/SETUP.md` §2 has it), and
+Demucs for the source separation (`docs/SETUP.md` §2).
 
 ## Evaluation against the SoccerNet labels
 
@@ -106,7 +107,7 @@ With the labels of `docs/SETUP.md` §4 in the match folders:
 |---|---|
 | `scripts/eval_memory.py --runs full no_arbiter ...` | memory over knowledge time: events counted and held, corrections, score / lineups / counts, identities |
 | `scripts/inject_errors.py` | error injection: a substitution never reported, a card given to the wrong player — does memory recover, and how soon |
-| `scripts/run_gate.py` then `eval_memory.py` | the confidence-gating baseline on the same analyzer answers |
-| `scripts/eval_commentary.py` | commentary claims (fact / hedged / names / corrections) next to a status-blind commentator |
+| `scripts/run_live.py --name gate0.9 --set events.ask_confidence=true --set consistency.gate=0.9` then `eval_memory.py` | the confidence-gating baseline: its own live run (perception, analyzer and memory), a sighting kept only at confidence ≥ τ |
+| `scripts/eval_commentary.py` | commentary claims (fact / hedged / names / corrections) next to a status-blind commentator; timing (shots called as they happen, speaking rate) next to the broadcast's commentators |
 
 Numbers: `docs/results.md`.

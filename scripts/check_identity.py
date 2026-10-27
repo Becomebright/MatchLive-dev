@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 
 import cv2
 
-from matchlive.common.cache import iter_frames, load_perception
+from matchlive.common.cache import cache_path, iter_frames, load_perception
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
 from matchlive.perception.detection import to_detections
@@ -36,7 +36,9 @@ def main():
     config = load_config()
     match = Match(config, args.match)
     start_frame, n_frames = int(round(args.start * 25)), int(round(args.seconds * 25))
-    arrays, meta = load_perception(MatchRunner(config).run_perception(match, args.half, start_frame, n_frames))
+    # The span's cache if it is there; the models (TensorRT sessions on the GPU) only to make it.
+    path = cache_path(config, match.video_path(args.half), match.name, args.half, start_frame, n_frames)
+    arrays, meta = load_perception(path if path.exists() else MatchRunner(config).run_perception(match, args.half, start_frame, n_frames))
     decoded = {f: rest for f, *rest in iter_frames(arrays)}
 
     players = match.metadata["players"]

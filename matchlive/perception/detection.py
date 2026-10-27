@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from matchlive.common.cache import _file_id
 from matchlive.common.types import Detection
 
 # RF-DETR class ids for this soccer model (checkpoint class_names are
@@ -43,11 +44,12 @@ def to_detections(boxes_ltwh: np.ndarray, scores: np.ndarray, class_ids: np.ndar
     return records
 
 
-def session_providers(config: dict[str, Any], cache_dir: Path, trt_options: dict | None = None) -> list:
+def session_providers(config: dict[str, Any], model: Path, cache_dir: Path, trt_options: dict | None = None) -> list:
     """Build ORT's provider list from the config's preference order, skipping unavailable ones.
 
-    `config` needs `providers`, `fp16` and `trt_cache` (engine dir under `cache_dir`);
-    `trt_options` adds TensorRT EP options, e.g. the shape profile of a dynamic batch.
+    `config` needs `providers`, `fp16` and `trt_cache` (engine dir under `cache_dir`), `model`
+    is the ONNX file; `trt_options` adds TensorRT EP options, e.g. the shape profile of a dynamic
+    batch.
     """
     # CUDA/cuDNN come from the pip nvidia-* wheels; ORT only finds them after this call.
     ort.preload_dlls()
@@ -62,10 +64,13 @@ def session_providers(config: dict[str, Any], cache_dir: Path, trt_options: dict
                 import tensorrt_libs  # noqa: F401
             except ImportError:
                 continue
-            engine_dir = cache_dir / config["trt_cache"]
+            # ORT keys an engine by the model's file name and graph, not its weights: the engine
+            # dir carries the file's content id, so a model re-exported under the same name
+            # builds a new engine instead of loading the old one.
+            engine_dir = cache_dir / config["trt_cache"] / _file_id(model)[2]
             engine_dir.mkdir(parents=True, exist_ok=True)
             # Building an engine takes minutes, so both the engine and TensorRT's kernel
-            # timing cache (shared by all engines, one level up) are persisted; later
+            # timing cache (shared by all engines, two levels up) are persisted; later
             # sessions with the same model and options load the engine straight from disk.
             providers.append((
                 "TensorrtExecutionProvider",
@@ -75,7 +80,7 @@ def session_providers(config: dict[str, Any], cache_dir: Path, trt_options: dict
                     "trt_engine_cache_enable": True,
                     "trt_engine_cache_path": str(engine_dir),
                     "trt_timing_cache_enable": True,
-                    "trt_timing_cache_path": str(engine_dir.parent),
+                    "trt_timing_cache_path": str(engine_dir.parent.parent),
                     **(trt_options or {}),
                 },
             ))
@@ -95,7 +100,7 @@ class RFDETRDetector:
         self.session = ort.InferenceSession(
             str(checkpoints_dir / config["model"]),
             sess_options=options,
-            providers=session_providers(config, cache_dir),
+            providers=session_providers(config, checkpoints_dir / config["model"], cache_dir),
         )
         # ORT silently falls back when a provider fails to initialise, so record what
         # is actually running.
@@ -103,10 +108,7 @@ class RFDETRDetector:
 
         self.input_name = self.session.get_inputs()[0].name
         # Read the fixed input resolution off the model so _preprocess can resize to it.
-        shape = self.session.get_inputs()[0].shape
-        if len(shape) != 4 or not all(isinstance(v, int) for v in shape):
-            raise ValueError(f"Expected static NCHW ONNX input shape, got {shape}")
-        _, _, self.input_height, self.input_width = (int(v) for v in shape)
+        _, _, self.input_height, self.input_width = (int(v) for v in self.session.get_inputs()[0].shape)
         # Reused input buffer: preprocessing writes straight into it every frame.
         self.input = np.empty((1, 3, self.input_height, self.input_width), dtype=np.float32)
 
@@ -144,8 +146,6 @@ class RFDETRDetector:
         return ltwh, scores, class_ids
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        if frame.ndim != 3 or frame.shape[2] != 3:
-            raise ValueError(f"Expected HWC BGR frame with 3 channels, got shape {frame.shape}")
         resized = cv2.resize(frame, (self.input_width, self.input_height), interpolation=cv2.INTER_LINEAR)
         # One fused pass per channel into the contiguous NCHW buffer: BGR -> RGB by
         # channel index, then normalize. The straightforward astype/transpose/(x-mean)/std

@@ -1,17 +1,19 @@
 """Pre-match background for the commentary (DESIGN.md §6.8): kb.json in each match folder.
 
-    python scripts/build_kb.py [--match M ...]
+    python scripts/build_kb.py --prepare DIR [--match M ...]    # the articles, and a task for each side
+    python scripts/build_kb.py --answers DIR [--match M ...]    # check the agents' answers, write kb.json
 
 Two sources, both frozen before kick-off (the metadata's `timestamp`, UTC):
   - the league's results (football-data.co.uk, this season and the last): each side's place,
     points and last results, and the last league meeting of the two, from the games played
     before the match day only — computed here, no model;
   - Wikipedia: each club's season article and each player's article as they stood just before
-    kick-off (the last revision older than it). A model picks the facts a commentator could use,
-    quoting the words each rests on; a fact is kept only if its quote is in the article and
-    every number in it is in the quote.
+    kick-off (the last revision older than it). An agent reads them (DIR/<match>/<side>/task.md,
+    one agent per side, run by hand) and picks the facts a commentator could use, quoting the
+    words each rests on, into answers.json; a fact is kept only if its quote is in the article
+    and every number in it is in the quote.
 Every fact carries its source (page, revision id and time), and the build fails if a revision
-is not older than kick-off. Downloads and model calls are cached (paths.cache/kb, the API cache).
+is not older than kick-off. Downloads are cached (paths.cache/kb).
 
 Output: {"kickoff", "sources": {id: {...}}, "teams": {side: {"manager", "captain", "facts"}},
 "players": {hash: {"facts"}}}, each fact {"text", "source", "quote"}. Match.prematch reads it.
@@ -32,10 +34,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from matchlive.common.api import APIClient
 from matchlive.common.config import load_config
 from matchlive.common.match import Match
-from matchlive.events.analyzer import parse_json
 
 MATCHES = ("2016-02-07 - 19-00 Chelsea 1 - 1 Manchester United", "2016-09-16 - 22-00 Chelsea 1 - 2 Liverpool")
 AGENT = "MatchLive-research/0.1 (pre-match knowledge base; one request at a time)"
@@ -48,17 +48,21 @@ RESULTS_NAMES = {"Manchester United": "Man United", "Manchester City": "Man City
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--match", action="append", default=None, help="default: both benchmark matches")
+    step = ap.add_mutually_exclusive_group(required=True)
+    step.add_argument("--prepare", type=Path, help="write the articles and the agents' tasks here")
+    step.add_argument("--answers", type=Path, help="read the agents' answers from here and write kb.json")
     args = ap.parse_args()
     config = load_config()
     cache = config["paths"]["cache"] / "kb"
     cache.mkdir(parents=True, exist_ok=True)
-    client = APIClient(config["api"], config["paths"]["cache"])
     for name in args.match or MATCHES:
         match = Match(config, name)
         meta = match.metadata
         kickoff = datetime.fromtimestamp(int(meta["timestamp"]), tz=timezone.utc)
         teams = meta["teams"]
         kb = {"kickoff": kickoff.isoformat(), "sources": {}, "teams": {}, "players": {}}
+        work = (args.prepare or args.answers) / f"{kickoff.date()} {teams['home']} v {teams['away']}"
+        fixture = dict(match=f"{teams['home']} v {teams['away']}", day=kickoff.date().isoformat())
 
         # 1. The table and form, from the results of the games before the match day.
         season = meta["season"]                                   # "2016-2017"
@@ -76,40 +80,65 @@ def main():
         if meeting:
             kb["teams"]["home"]["facts"].append(meeting)
 
-        # 2. Each club's season article: manager, captain and a few facts.
+        # 2. Each club's season article and each player's article, as of kick-off.
         years = f"{season[:4]}–{season[7:9]}"                     # "2016–17"
+        pages = {}                                                # side -> (club page, {hash: player page})
         for side in ("home", "away"):
             title = f"{years} {teams[side]} F.C. season"
-            page = revision(cache, title, kickoff)
-            if page is None:
+            club = revision(cache, title, kickoff)
+            if club is None:
                 print(f"no article {title!r} before kick-off")
-                continue
-            source = add_source(kb, page)
-            answer = ask(client, CLUB_PROMPT.format(team=teams[side], date=page["timestamp"][:10],
-                                                    match=f"{teams['home']} v {teams['away']}",
-                                                    day=kickoff.date().isoformat()), page["text"])
-            text = normalize(page["text"])
-            for role in ("manager", "captain"):
-                who = answer.get(role) or {}
-                if who.get("name") and quoted(who.get("quote", ""), text) and _words(who["name"]) <= _words(who["quote"]):
-                    kb["teams"][side][role] = {"text": who["name"], "source": source, "quote": who["quote"]}
-            kb["teams"][side]["facts"] += checked(answer.get("facts", []), text, source)
+            players = {}
+            for p in meta["players"]:
+                if p["team_side"] == side:
+                    players[p["hash"]] = player_page(cache, p["long_name"], teams[side], kickoff)
+                    if players[p["hash"]] is None:
+                        print(f"  {p['long_name']}: no article found")
+            pages[side] = (club, players)
 
-        # 3. Each player's article: up to three facts.
-        for p in meta["players"]:
-            team = teams[p["team_side"]]
-            page = player_page(cache, p["long_name"], team, kickoff)
-            if page is None:
-                print(f"  {p['long_name']}: no article found")
-                continue
-            source = add_source(kb, page)
-            excerpt = player_excerpt(page["text"], team)
-            answer = ask(client, PLAYER_PROMPT.format(name=p["long_name"], team=team, date=page["timestamp"][:10],
-                                                      match=f"{teams['home']} v {teams['away']}",
-                                                      day=kickoff.date().isoformat()), excerpt)
-            facts = checked(answer.get("facts", []), normalize(page["text"]), source)[:3]
-            kb["players"][p["hash"]] = {"facts": facts}
-            print(f"  {p['short_name']}: {len(facts)} facts from {page['title']!r} ({page['timestamp'][:10]})")
+        if args.prepare:
+            # One task per side: the club's article and its players' articles, readable.
+            for side, (club, players) in pages.items():
+                d = work / side
+                (d / "players").mkdir(parents=True, exist_ok=True)
+                if club:
+                    (d / "club.txt").write_text(readable(club["text"])[:60000])
+                roster = []
+                for p in meta["players"]:
+                    page = players.get(p["hash"])
+                    if p["team_side"] == side and page:
+                        (d / "players" / f"{p['hash']}.txt").write_text(
+                            f"{p['long_name']} (#{p['jersey_number']}, {teams[side]}) — Wikipedia, as of "
+                            f"{page['timestamp'][:10]}\n\n" + readable(player_excerpt(page["text"], teams[side])))
+                        roster.append(f"- {p['hash']}: {p['long_name']}")
+                (d / "task.md").write_text(TASK.format(team=teams[side], years=years, **fixture,
+                                                       date=club["timestamp"][:10] if club else "-",
+                                                       roster="\n".join(roster), answers=d / "answers.json"))
+            print(f"{name}: tasks in {work}")
+            continue
+
+        for side, (club, players) in pages.items():
+            answer = json.loads((work / side / "answers.json").read_text())
+            if club:
+                source = add_source(kb, club)
+                text = normalize(club["text"])
+                got = answer.get("club") or {}
+                for role in ("manager", "captain"):
+                    who = got.get(role) or {}
+                    if who.get("name") and quoted(who.get("quote", ""), text) and _words(who["name"]) <= _words(who["quote"]):
+                        kb["teams"][side][role] = {"text": who["name"], "source": source, "quote": who["quote"]}
+                kb["teams"][side]["facts"] += checked(got.get("facts", []), text, source, f"{teams[side]} season")[:8]
+            for pid, page in players.items():
+                if page is None:
+                    continue
+                source = add_source(kb, page)
+                # A player's fact may rest on his own article or, for his season so far, the club's.
+                facts = []
+                for f in (answer.get("players") or {}).get(pid, {}).get("facts", []):
+                    own = club is None or quoted(str(f.get("quote", "")), normalize(page["text"]))
+                    facts += checked([f], normalize((page if own else club)["text"]),
+                                     source if own else f"wiki:{club['title']}", page["title"])
+                kb["players"][pid] = {"facts": facts[:3]}
 
         # Nothing from after kick-off.
         late = [s for s in kb["sources"].values() if "timestamp" in s and s["timestamp"] >= kickoff.isoformat()]
@@ -232,36 +261,61 @@ def add_source(kb: dict, page: dict) -> str:
 
 # ---- the model's picks, checked against the text ----
 
-CLUB_PROMPT = """Below is the Wikipedia article on {team}'s season as it stood on {date}, before the match {match} on
-{day}. Using only this text:
-- who is {team}'s manager (head coach), and who is the club captain (if the text says);
-- up to three facts a TV commentator could use about {team} before this match: new signings or departures of
-  the summer or winter, how the season has gone so far, a milestone. Nothing that is not in the text.
-For each, quote the exact words of the text it rests on (a short span, copied character for character).
-Answer with JSON only: {{"manager": {{"name": "...", "quote": "..."}} | null, "captain": {{"name": "...",
-"quote": "..."}} | null, "facts": [{{"text": "one short sentence", "quote": "..."}}]}}"""
+TASK = """# Pre-match knowledge for the TV commentary of {match}, {day}: {team}
 
-PLAYER_PROMPT = """Below is (part of) the Wikipedia article on {name} of {team}, as it stood on {date}, before the match
-{match} on {day}. Using only this text, give up to three facts a TV commentator could use about him during that
-match: when and from where he came to {team} (and for how much, if stated), his international career, his honours,
-a notable record, his season so far. Short spoken sentences, as of the match day. Nothing that is not in the text.
-For each fact, quote the exact words of the text it rests on (a short span, copied character for character).
-Answer with JSON only: {{"facts": [{{"text": "one short sentence", "quote": "..."}}]}}"""
+You are building what a TV commentator knows about {team} going into {match} on {day}. In this folder:
+- `club.txt`: the Wikipedia article on {team}'s {years} season as it stood on {date}, before the match;
+- `players/<id>.txt`: the article on each {team} player as it stood before the match (the lead and the
+  sections about his time at the club).
+
+Use only these texts. Not your own knowledge: you may know what happened after {day}, and none of it may
+appear. Everything is as of the match day.
+
+1. From `club.txt`: who is {team}'s manager (head coach), and who is the club captain, if the text says;
+   and up to eight facts a commentator could draw on during the match: how the season has gone so far,
+   match by match where the text tells it (the result and what decided it: a comeback, a late winner, a
+   red card); the manager's situation (when he took over, his system, his changes); signings, departures
+   and injuries; a milestone. Leave out the league position and the last three results (given
+   elsewhere).
+2. For each player below: up to three facts, the most useful to a commentator during this match first:
+   his season so far (appearances, goals, form, a recent moment), his role or style in the team, a notable
+   record or honour. At most one about his transfer (when, from where, the fee), and only if the text
+   has little else. Nothing if the text has nothing useful.
+{roster}
+
+Write each fact as one short spoken sentence, as a commentator would say it, naming the player or club
+("Mane, a £30 million summer signing from Southampton, has scored once already this season").
+For each fact (and for the manager and the captain), quote the exact words of the text it rests on: a
+short span, copied character for character from the file. Every number in a fact must appear in its
+quote, and the quote must say what the fact says.
+
+Write JSON only to `{answers}`:
+{{"club": {{"manager": {{"name": "...", "quote": "..."}} | null, "captain": {{"name": "...", "quote": "..."}} | null,
+"facts": [{{"text": "...", "quote": "..."}}]}},
+ "players": {{"<id>": {{"facts": [{{"text": "...", "quote": "..."}}]}}}}}}
+"""
 
 
-def ask(client: APIClient, prompt: str, text: str) -> dict:
-    result = client.generate([prompt, strip_refs(text)[:30000]], json_output=True)
-    answer = parse_json(result.text)
-    return answer if isinstance(answer, dict) else {}
+def readable(wikitext: str) -> str:
+    """An article's wikitext as an agent reads it: references gone, links reduced to their words, no
+    bold or italic quotes — the same reductions `normalize` makes, so a quote copied from it matches."""
+    text = strip_refs(wikitext)
+    text = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]", r"\1", text)
+    return re.sub(r"'{2,}", "", text)
 
 
-def checked(facts, text: str, source: str) -> list[dict]:
-    """The facts whose quote is in the article's text and whose numbers are all in the quote."""
+def checked(facts, text: str, source: str, where: str = "") -> list[dict]:
+    """The facts whose quote is in the article's text and whose numbers are all in the quote (the
+    others are printed, for a look)."""
     out = []
     for f in facts if isinstance(facts, list) else []:
         if not isinstance(f, dict) or not f.get("text") or not f.get("quote"):
             continue
-        if quoted(f["quote"], text) and set(re.findall(r"\d+", f["text"])) <= set(re.findall(r"\d+", f["quote"])):
+        if not quoted(f["quote"], text):
+            print(f"  {where}: quote not in the article, dropped: {f['text']!r}")
+        elif not set(re.findall(r"\d+", f["text"])) <= set(re.findall(r"\d+", f["quote"])):
+            print(f"  {where}: a number not in its quote, dropped: {f['text']!r} / {f['quote']!r}")
+        else:
             out.append({"text": f["text"].strip(), "source": source, "quote": f["quote"].strip()})
     return out
 
